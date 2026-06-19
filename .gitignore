@@ -1,0 +1,10 @@
+.venv/
+.pytest_cache/
+.vs/
+__pycache__/
+*.py[cod]
+distillation_history.sqlite
+.streamlit/secrets.toml
+.env
+*.log
+.pytest_tmp_*/
