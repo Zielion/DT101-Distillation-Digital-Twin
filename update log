@@ -1,0 +1,23 @@
+2026/6/18
+New files:
+.pytest_tmp_historian_fix
+.pytest_tmp_tick_seconds
+.pytest_tmp_tick_model_green
+.pytest_tmp_tick_axis_red
+.pytest_tmp_layer_historian
+.pytest_tmp_layer_dynamics
+.pytest_tmp_feed_valve_sync
+.pytest_tmp_feed_valve
+SQLLite files to store data
+
+Changes to model:
+Addition of valve connecting feed tank to distillation column. Automatically turns off if capacity goes below 10% to represent a simple PLC responding to change in tank volume
+Rectification of heating model - Top and bottom set temperatures, middle 5 layers change temperature following exponential decay model over time. Final temperature calculated by linear interpolation from the top and bottom temperatures.
+Addition of graph "Layer Temperature Historian Trends" - Records change in temperature of all 7 layers as a function of ticks (unit time used for simulation)
+Error fix: Change in x-axis of historian trends from local computer time to ticks (time unit for simulation)
+
+To-do:
+Verify composition changes in line with temperature changes in the distillation column
+Add a function to refill the feed tank - can be fixed volume addition or continuous addition
+Simplify the model and remove unnecessary parts - recycler and extra pipe connections to be removed
+Clean-up user interface
