@@ -6,14 +6,23 @@ from .config import (
     BOTTOM_LEVEL_SETPOINT,
     BOTTOM_LOW_LOW,
     BOTTOM_TEMP_SETPOINT,
+    FEED_TANK_HIGH_HIGH,
     FEED_TANK_LOW_LOW,
     PRESSURE_HIGH_HIGH,
     PRESSURE_SETPOINT,
+    PRODUCT_EXPORT_START_LEVEL,
+    PRODUCT_EXPORT_STOP_LEVEL,
     REFLUX_DRUM_HIGH_HIGH,
     REFLUX_DRUM_LEVEL_SETPOINT,
     TOP_TEMP_SETPOINT,
 )
 from .process import clamp
+
+
+PLC_CONTROL_REVISION = 3
+
+FILLING_FEED_TANK = "FILLING_FEED_TANK"
+FEEDING_COLUMN = "FEEDING_COLUMN"
 
 
 @dataclass
@@ -49,6 +58,9 @@ class PLCController:
     top_temp_setpoint: float = TOP_TEMP_SETPOINT
     bottom_temp_setpoint: float = BOTTOM_TEMP_SETPOINT
     stable_seconds: float = 0.0
+    feed_cycle_phase: str = FILLING_FEED_TANK
+    distillate_export_running: bool = False
+    bottoms_export_running: bool = False
     pids: dict[str, PID] = field(
         default_factory=lambda: {
             "PIC101": PID(kp=2.0, ki=0.05, bias=55.0, reverse=False),
@@ -66,15 +78,54 @@ class PLCController:
         feed_tank_level = float(snapshot.get("DT101.PV.FEED_TANK_LEVEL", 80.0))
         bottom_level = float(snapshot.get("DT101.PV.BOTTOM_LEVEL", 55.0))
         reflux_drum_level = float(snapshot.get("DT101.PV.REFLUX_DRUM_LEVEL", 50.0))
+        distillate_tank_level = float(snapshot.get("DT101.PV.DISTILLATE_TANK_LEVEL", 20.0))
+        bottoms_tank_level = float(snapshot.get("DT101.PV.BOTTOMS_TANK_LEVEL", 20.0))
         top_temp = float(snapshot.get("DT101.PV.TOP_TEMP", 79.0))
         bottom_temp = float(snapshot.get("DT101.PV.BOTTOM_TEMP", 100.0))
         feed_valve_open_request = bool(snapshot.get("DT101.HMI.FEED_VALVE_OPEN_REQUEST", True))
+        feed_supply_run_request = bool(snapshot.get("DT101.HMI.FEED_SUPPLY_RUN_REQUEST", True))
+        feed_valve_open_feedback = bool(snapshot.get("DT101.FB.FEED_VALVE_OPEN", False))
+        feed_supply_pump_running_feedback = bool(
+            snapshot.get("DT101.FB.FEED_SUPPLY_PUMP_RUNNING", False)
+        )
+        feed_supply_valve_open_feedback = bool(
+            snapshot.get("DT101.FB.FEED_SUPPLY_VALVE_OPEN", False)
+        )
+        if feed_tank_level >= FEED_TANK_HIGH_HIGH:
+            self.feed_cycle_phase = FEEDING_COLUMN
+        elif feed_tank_level <= FEED_TANK_LOW_LOW:
+            self.feed_cycle_phase = FILLING_FEED_TANK
+        feed_supply_run = (
+            self.feed_cycle_phase == FILLING_FEED_TANK
+            and feed_supply_run_request
+            and not feed_valve_open_feedback
+        )
+        feed_valve_open = (
+            self.feed_cycle_phase == FEEDING_COLUMN
+            and feed_valve_open_request
+            and not feed_supply_pump_running_feedback
+            and not feed_supply_valve_open_feedback
+        )
+        self.distillate_export_running = self._product_export_state(
+            self.distillate_export_running,
+            distillate_tank_level,
+        )
+        self.bottoms_export_running = self._product_export_state(
+            self.bottoms_export_running,
+            bottoms_tank_level,
+        )
         self.top_temp_setpoint = float(snapshot.get("DT101.SP.TOP_TEMP", self.top_temp_setpoint))
         self.bottom_temp_setpoint = float(snapshot.get("DT101.SP.BOTTOM_TEMP", self.bottom_temp_setpoint))
 
         commands: dict[str, float | bool] = {
+            "feed_supply_pump": feed_supply_run,
+            "feed_supply_valve": feed_supply_run,
+            "distillate_export_pump": self.distillate_export_running,
+            "distillate_export_valve": self.distillate_export_running,
+            "bottoms_export_pump": self.bottoms_export_running,
+            "bottoms_export_valve": self.bottoms_export_running,
             "feed_pump": True,
-            "feed_valve": 50.0 if feed_valve_open_request else 0.0,
+            "feed_valve": 100.0 if feed_valve_open else 0.0,
             "top_temp_setpoint": self.top_temp_setpoint,
             "bottom_temp_setpoint": self.bottom_temp_setpoint,
             "reboiler_duty": self.pids["TIC101"].compute(self.bottom_temp_setpoint, bottom_temp, dt),
@@ -86,6 +137,9 @@ class PLCController:
         }
 
         self._advance_mode(snapshot, dt)
+
+        if feed_tank_level >= FEED_TANK_HIGH_HIGH:
+            alarms.append("DT101.ALARM.FEED_TANK_HIGH_HIGH")
 
         if pressure > PRESSURE_HIGH_HIGH:
             alarms.append("DT101.ALARM.HIGH_HIGH_PRESSURE")
@@ -112,7 +166,20 @@ class PLCController:
         if was_idle or self.mode == "IDLE":
             commands.update({"feed_pump": False, "feed_valve": 0.0, "reboiler_duty": 0.0})
 
+        # With no column feed there is no vapor load in this simplified model.
+        # High-high pressure remains authoritative and keeps maximum cooling.
+        if float(commands["feed_valve"]) <= 0.0 and pressure <= PRESSURE_HIGH_HIGH:
+            commands["condenser_valve"] = 0.0
+
         return ControlOutput(commands=commands, alarms=alarms, mode=self.mode)
+
+    @staticmethod
+    def _product_export_state(running: bool, level: float) -> bool:
+        if level > PRODUCT_EXPORT_START_LEVEL:
+            return True
+        if level < PRODUCT_EXPORT_STOP_LEVEL:
+            return False
+        return running
 
     def _advance_mode(self, snapshot: dict[str, float | str | bool], dt: float) -> None:
         if self.mode == "IDLE":

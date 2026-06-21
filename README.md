@@ -12,7 +12,7 @@ The implementation follows the assignment concept described in `Distillation_Pro
 - Seven column temperature layers from Layer 1 at the bottom to Layer 7 at the top.
 - Five persistent middle-layer temperatures with a 20-second first-order response for heating and cooling.
 - PLC scan cycle, operating state machine, PID-like loops, alarms, and safety interlocks.
-- Operator-controlled feed valve `V-100` with separate HMI request, PLC command, physical feedback, and resulting feed flow.
+- Automatic Feed tank fill/feed cycling with feedback-confirmed interlocks between `P-100`/`V-099` and `V-100`.
 - Four injectable faults covering sensor, equipment, process, and infrastructure layers.
 - SQLite historian with tick-based general trends and a dedicated seven-layer temperature chart.
 - DeepSeek operator recommendations with a deterministic fallback when the API is unavailable.
@@ -140,20 +140,22 @@ Implemented PID-like loops:
 
 Safety interlocks remain authoritative. For example, high-high pressure forces reboiler duty to zero, fully opens condenser cooling, stops the feed pump, closes the feed valve, and places the controller in `SHUTDOWN`.
 
-## Feed valve V-100
+## Feed tank automatic cycle
 
-The sidebar button opens or closes the feed valve between the feed system and the column. Each button click performs one complete one-second PLC scan and process tick so the diagram, live table, tag bus, and historian update during the same interaction.
+The Feed tank starts at `10%` and uses one latched PLC phase. At `<=10%`, the PLC closes `V-100`, waits for closed feedback, and then runs `P-100` with `V-099` open. At `>=95%`, it stops `P-100`, closes `V-099`, waits for both feedbacks, and then opens `V-100`. The phase remains latched between the thresholds, and the feedback checks provide a one-scan break-before-make interval.
+
+The two sidebar controls are automatic-operation enables, not direct actuator commands. Disabling an enable safely closes that side; enabling it cannot bypass the active phase, equipment-feedback permissions, or safety interlocks.
 
 The valve uses separate signals:
 
 | Signal | Tag | Meaning |
 | --- | --- | --- |
-| Operator request | `DT101.HMI.FEED_VALVE_OPEN_REQUEST` | Requested open/closed state from the sidebar |
+| Operator enable | `DT101.HMI.FEED_VALVE_OPEN_REQUEST` | Allows automatic V-100 opening when phase and feedback permits are satisfied |
 | PLC command | `DT101.CMD.FEED_VALVE` | Commanded valve position in percent |
 | Actual feedback | `DT101.FB.FEED_VALVE_OPEN` | Physical open/closed feedback used by the display |
 | Resulting flow | `DT101.PV.FEED_FLOW` | Simulated feed flow into the column |
 
-In normal active operation, an open request commands `50%` and produces approximately `10 L/min`; a closed request commands `0%` and produces `0 L/min`. `IDLE`, high-high pressure, or low-low feed-tank level can override an open request and keep feeding stopped.
+When permitted, V-100 commands `100%` and produces approximately `20 L/min`; otherwise it commands `0%`. `IDLE`, high-high pressure, and low Feed tank level remain authoritative. The `>=95%` alarm clears automatically below `95%` so it does not block the next automatic cycle.
 
 ## Main temperature tags
 
@@ -188,8 +190,8 @@ Each fault is designed to produce detectable evidence within 60 simulated second
 2. Select equipment in the interactive process overview and show its role, control meaning, and live values.
 3. Change the top and bottom temperatures. Point out that Layers 7 and 1 change immediately.
 4. Run multiple ticks and show Layers 2-6 approaching their new linear targets gradually in the process figure and layer-temperature chart.
-5. Close `V-100`. Verify the request, command, feedback, and feed flow change to the closed/no-flow condition.
-6. Reopen `V-100` and verify normal feed flow returns unless a PLC interlock prevents it.
+5. Advance from the reset `10%` level and show P-100/V-099 filling while V-100 remains closed.
+6. Set or advance the level to `95%`; show the input devices stop for one feedback-confirmation scan before V-100 opens. Repeat at `10%` for the reverse transition.
 7. Inject top temperature sensor drift and show the inconsistency with pressure, reflux, and purity evidence.
 8. Inject the reflux-valve-stuck fault and show the command-feedback mismatch and separation-quality degradation.
 9. Inject a feed-composition disturbance and observe the temperature profile, controller outputs, and purity proxy.
@@ -211,7 +213,7 @@ The suite covers:
 - Direct top and bottom temperature control.
 - Seven-layer initialization, tag publication, exponential heating/cooling, convergence, and non-overshoot behavior.
 - PLC state transitions, bounded outputs, high-high pressure shutdown, and low-level interlocks.
-- Immediate V-100 request, command, feedback, and feed-flow synchronization.
+- Feed-cycle phase latching, automatic enables, and feedback-confirmed break-before-make transitions.
 - Four fault-detection paths.
 - SQLite writes, legacy database migration, tick queries, reset behavior, and latest-tick recovery.
 - General and layer-temperature chart rendering with tick-based `Second` axes.

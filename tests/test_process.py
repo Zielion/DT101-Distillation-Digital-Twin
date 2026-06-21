@@ -184,12 +184,136 @@ def test_closed_feed_valve_stops_feed_flow():
     assert next_state.feed_flow == 0.0
 
 
-def test_normal_feed_valve_position_preserves_feed_flow():
+def test_no_column_feed_stops_product_inflows_and_preserves_tank_levels():
+    state = ProcessState(distillate_tank_level=22.3, bottoms_tank_level=31.8)
+
+    next_state = state.step(
+        {
+            "feed_pump": True,
+            "feed_valve": 0.0,
+            "distillate_valve": 100.0,
+            "bottoms_valve": 100.0,
+            "distillate_export_pump": False,
+            "distillate_export_valve": False,
+            "bottoms_export_pump": False,
+            "bottoms_export_valve": False,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_flow == 0.0
+    assert next_state.distillate_flow == 0.0
+    assert next_state.bottoms_flow == 0.0
+    assert next_state.distillate_tank_level == state.distillate_tank_level
+    assert next_state.bottoms_tank_level == state.bottoms_tank_level
+
+
+def test_fully_open_feed_valve_produces_twenty_liters_per_minute():
     state = ProcessState()
 
-    next_state = state.step({"feed_pump": True, "feed_valve": 50.0}, {}, 1.0)
+    next_state = state.step({"feed_pump": True, "feed_valve": 100.0}, {}, 1.0)
 
+    assert next_state.feed_flow == 20.0
+
+
+def test_feed_supply_balances_normal_column_feed():
+    state = ProcessState(feed_tank_level=80.0)
+
+    next_state = state.step(
+        {
+            "feed_supply_pump": True,
+            "feed_supply_valve": True,
+            "feed_pump": True,
+            "feed_valve": 50.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 10.0
     assert next_state.feed_flow == 10.0
+    assert next_state.feed_tank_level == 80.0
+    assert next_state.to_tags()["DT101.PV.FEED_INLET_FLOW"] == 10.0
+
+
+@pytest.mark.parametrize(
+    ("pump_running", "valve_open"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_feed_supply_requires_both_pump_and_valve(pump_running, valve_open):
+    state = ProcessState(feed_tank_level=80.0)
+
+    next_state = state.step(
+        {
+            "feed_supply_pump": pump_running,
+            "feed_supply_valve": valve_open,
+            "feed_pump": False,
+            "feed_valve": 0.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 0.0
+    assert next_state.feed_tank_level == 80.0
+
+
+def test_feed_supply_raises_level_when_column_feed_is_stopped():
+    state = ProcessState(feed_tank_level=80.0)
+
+    next_state = state.step(
+        {
+            "feed_supply_pump": True,
+            "feed_supply_valve": True,
+            "feed_pump": False,
+            "feed_valve": 0.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 10.0
+    assert next_state.feed_tank_level == pytest.approx(80.15)
+
+
+def test_product_export_requires_linked_pump_and_valve():
+    state = ProcessState(distillate_tank_level=70.0, bottoms_tank_level=70.0)
+
+    next_state = state.step(
+        {
+            "distillate_export_pump": True,
+            "distillate_export_valve": True,
+            "bottoms_export_pump": True,
+            "bottoms_export_valve": False,
+            "distillate_valve": 0.0,
+            "bottoms_valve": 0.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.distillate_outlet_flow == 15.0
+    assert next_state.bottoms_outlet_flow == 0.0
+    assert next_state.distillate_tank_level < state.distillate_tank_level
+    assert next_state.bottoms_tank_level == state.bottoms_tank_level
+
+
+def test_product_export_flows_are_published_as_tags():
+    state = ProcessState().step(
+        {
+            "distillate_export_pump": True,
+            "distillate_export_valve": True,
+            "bottoms_export_pump": True,
+            "bottoms_export_valve": True,
+        },
+        {},
+        1.0,
+    )
+
+    tags = state.to_tags()
+    assert tags["DT101.PV.DISTILLATE_OUTLET_FLOW"] == 15.0
+    assert tags["DT101.PV.BOTTOMS_OUTLET_FLOW"] == 15.0
 
 
 def test_condenser_opening_reduces_pressure_trend():
