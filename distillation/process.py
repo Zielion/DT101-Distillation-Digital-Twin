@@ -3,10 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from math import exp
 
-from .config import BOTTOM_TEMP_SETPOINT, TOP_TEMP_SETPOINT
+from .config import (
+    BOTTOM_TEMP_SETPOINT,
+    FEED_SUPPLY_FLOW_LPM,
+    PRODUCT_EXPORT_FLOW_LPM,
+    TOP_TEMP_SETPOINT,
+)
 
 
 MIDDLE_LAYER_TIME_CONSTANT_SECONDS = 20.0
+PROCESS_MODEL_REVISION = 3
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -42,7 +48,8 @@ def normalize_process_state(state: object) -> "ProcessState":
 
 @dataclass(frozen=True)
 class ProcessState:
-    feed_tank_level: float = 80.0
+    feed_tank_level: float = 10.0
+    feed_inlet_flow: float = 0.0
     feed_composition_light: float = 0.50
     feed_flow: float = 10.0
     feed_temperature: float = 30.0
@@ -55,6 +62,8 @@ class ProcessState:
     reflux_flow: float = 5.5
     distillate_flow: float = 4.5
     bottoms_flow: float = 4.5
+    distillate_outlet_flow: float = 0.0
+    bottoms_outlet_flow: float = 0.0
     cooling_water_flow: float = 20.0
     purity_proxy: float = 96.0
     separation_efficiency: float = 0.92
@@ -75,6 +84,8 @@ class ProcessState:
         object.__setattr__(self, "mid_temperature", float(middle_layers[2]))
 
     def step(self, commands: dict[str, float | bool], faults: dict[str, bool | float], dt: float) -> "ProcessState":
+        feed_supply_pump = bool(commands.get("feed_supply_pump", False))
+        feed_supply_valve = bool(commands.get("feed_supply_valve", False))
         feed_pump = bool(commands.get("feed_pump", True))
         feed_valve = float(commands.get("feed_valve", 50.0))
         reflux_valve_cmd = float(commands.get("reflux_valve", 50.0))
@@ -83,18 +94,37 @@ class ProcessState:
         condenser_valve = float(commands.get("condenser_valve", 55.0))
         distillate_valve = float(commands.get("distillate_valve", 50.0))
         bottoms_valve = float(commands.get("bottoms_valve", 50.0))
+        distillate_export_pump = bool(commands.get("distillate_export_pump", False))
+        distillate_export_valve = bool(commands.get("distillate_export_valve", False))
+        bottoms_export_pump = bool(commands.get("bottoms_export_pump", False))
+        bottoms_export_valve = bool(commands.get("bottoms_export_valve", False))
         manual_top_temperature = commands.get("top_temperature")
         manual_bottom_temperature = commands.get("bottom_temperature")
 
         feed_comp = float(faults.get("feed_composition_light", self.feed_composition_light))
+        feed_inlet_flow = FEED_SUPPLY_FLOW_LPM if feed_supply_pump and feed_supply_valve else 0.0
         feed_flow = (feed_valve / 50.0) * 10.0 if feed_pump and self.feed_tank_level > 0 else 0.0
         reflux_flow = (reflux_valve / 50.0) * 5.5
-        distillate_flow = (distillate_valve / 50.0) * 4.5
-        bottoms_flow = (bottoms_valve / 50.0) * 4.5
+        distillate_flow = (distillate_valve / 50.0) * 4.5 if feed_flow > 0.0 else 0.0
+        bottoms_flow = (bottoms_valve / 50.0) * 4.5 if feed_flow > 0.0 else 0.0
+        distillate_outlet_flow = (
+            PRODUCT_EXPORT_FLOW_LPM
+            if distillate_export_pump and distillate_export_valve and self.distillate_tank_level > 0.0
+            else 0.0
+        )
+        bottoms_outlet_flow = (
+            PRODUCT_EXPORT_FLOW_LPM
+            if bottoms_export_pump and bottoms_export_valve and self.bottoms_tank_level > 0.0
+            else 0.0
+        )
         condensate_flow = clamp(3.0 + condenser_valve * 0.055 + reboiler_duty * 0.025, 1.0, 12.0)
         liquid_downflow = clamp(feed_flow * 0.45 + reflux_flow * 0.30, 0.0, 10.0)
 
-        feed_tank_level = clamp(self.feed_tank_level - feed_flow * dt * 0.015, 0.0, 100.0)
+        feed_tank_level = clamp(
+            self.feed_tank_level + (feed_inlet_flow - feed_flow) * dt * 0.015,
+            0.0,
+            100.0,
+        )
         reflux_drum_level = clamp(
             self.reflux_drum_level + (condensate_flow - reflux_flow - distillate_flow) * dt * 0.22,
             0.0,
@@ -105,8 +135,16 @@ class ProcessState:
             0.0,
             100.0,
         )
-        distillate_tank_level = clamp(self.distillate_tank_level + distillate_flow * dt * 0.025, 0.0, 100.0)
-        bottoms_tank_level = clamp(self.bottoms_tank_level + bottoms_flow * dt * 0.025, 0.0, 100.0)
+        distillate_tank_level = clamp(
+            self.distillate_tank_level + (distillate_flow - distillate_outlet_flow) * dt * 0.025,
+            0.0,
+            100.0,
+        )
+        bottoms_tank_level = clamp(
+            self.bottoms_tank_level + (bottoms_flow - bottoms_outlet_flow) * dt * 0.025,
+            0.0,
+            100.0,
+        )
 
         comp_deviation = (feed_comp - 0.50) * 100.0
         feed_flow_deviation = feed_flow - 10.0
@@ -145,6 +183,7 @@ class ProcessState:
         return replace(
             self,
             feed_tank_level=feed_tank_level,
+            feed_inlet_flow=feed_inlet_flow,
             feed_composition_light=feed_comp,
             feed_flow=feed_flow,
             top_temperature=top_temperature,
@@ -156,6 +195,8 @@ class ProcessState:
             reflux_flow=reflux_flow,
             distillate_flow=distillate_flow,
             bottoms_flow=bottoms_flow,
+            distillate_outlet_flow=distillate_outlet_flow,
+            bottoms_outlet_flow=bottoms_outlet_flow,
             cooling_water_flow=cooling_water_flow,
             purity_proxy=purity_proxy,
             separation_efficiency=separation_efficiency,
@@ -174,6 +215,7 @@ class ProcessState:
     def to_tags(self) -> dict[str, float]:
         tags = {
             "DT101.PV.FEED_TANK_LEVEL": self.feed_tank_level,
+            "DT101.PV.FEED_INLET_FLOW": self.feed_inlet_flow,
             "DT101.PV.FEED_X_LIGHT": self.feed_composition_light,
             "DT101.PV.FEED_FLOW": self.feed_flow,
             "DT101.PV.FEED_TEMP": self.feed_temperature,
@@ -186,6 +228,8 @@ class ProcessState:
             "DT101.PV.REFLUX_FLOW": self.reflux_flow,
             "DT101.PV.DISTILLATE_FLOW": self.distillate_flow,
             "DT101.PV.BOTTOMS_FLOW": self.bottoms_flow,
+            "DT101.PV.DISTILLATE_OUTLET_FLOW": self.distillate_outlet_flow,
+            "DT101.PV.BOTTOMS_OUTLET_FLOW": self.bottoms_outlet_flow,
             "DT101.PV.COOLING_WATER_FLOW": self.cooling_water_flow,
             "DT101.PV.PURITY_PROXY": self.purity_proxy,
             "DT101.PV.SEPARATION_EFFICIENCY": self.separation_efficiency,

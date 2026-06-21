@@ -15,7 +15,7 @@ The existing `V-100` remains the downstream valve between the Feed tank and Colu
 
 ## Control Architecture
 
-The sidebar exposes one input-supply toggle. Reset initializes the request as stopped. The button toggles `DT101.HMI.FEED_SUPPLY_RUN_REQUEST` and executes one normal one-second PLC/process tick so request, commands, feedback, flow, tank level, TagBus, and historian update together.
+The sidebar exposes separate automatic-operation enables for the input supply and V-100. Reset initializes both enables active, the Feed tank at `10%`, and all three devices closed. Each button click executes one normal one-second PLC/process tick so enables, commands, feedback, flow, tank level, TagBus, and historian update together.
 
 The PLC drives the linked devices through separate command and feedback signals:
 
@@ -24,7 +24,7 @@ The PLC drives the linked devices through separate command and feedback signals:
 - `DT101.FB.FEED_SUPPLY_PUMP_RUNNING`: Boolean actual pump feedback.
 - `DT101.FB.FEED_SUPPLY_VALVE_OPEN`: Boolean actual valve feedback.
 
-Both commands follow the single HMI request unless a safety interlock overrides them. The process publishes `DT101.PV.FEED_INLET_FLOW` as `10 L/min` only when both feedback signals are true; all other combinations produce `0 L/min`.
+The PLC stores one mutually exclusive phase, `FILLING_FEED_TANK` or `FEEDING_COLUMN`. At `<=10%`, it closes V-100 and starts P-100/V-099 only after V-100 closed feedback is confirmed. At `>=95%`, it stops P-100/V-099 and opens V-100 only after pump-stopped and valve-closed feedback are confirmed. The previous scan's feedback creates a break-before-make interval, while operator enables and safety interlocks remain authoritative. The process publishes `DT101.PV.FEED_INLET_FLOW` as `10 L/min` only when both input feedback signals are true.
 
 ## Tank Balance And Safety
 
@@ -42,7 +42,7 @@ Consequences:
 - Supply `0 L/min`, column feed `10 L/min`: level decreases as before.
 - The final level remains clamped to `0-100%`.
 
-At `95%`, the PLC latches a Feed tank high-level trip, commands `P-100` stopped and `V-099` closed, publishes zero inlet flow, and raises `DT101.ALARM.FEED_TANK_HIGH_HIGH`. The latch does not automatically restart the supply. Once the level is below `95%`, the operator must switch the request OFF to reset the latch, then switch it ON to restart.
+At `>=95%`, the PLC raises `DT101.ALARM.FEED_TANK_HIGH_HIGH` while transitioning to the column-feeding phase. The alarm clears automatically below `95%`; the phase remains latched until the level reaches `<=10%`, allowing continuous automatic cycling without operator alarm reset.
 
 ## Process Overview
 

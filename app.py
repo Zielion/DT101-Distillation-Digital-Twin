@@ -9,17 +9,50 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from distillation import config as config_module
+
+
+# Refresh shared constants before importing modules that depend on them.
+if not all(
+    hasattr(config_module, name)
+    for name in (
+        "FEED_TANK_MAX_CAPACITY_L",
+        "DISTILLATE_TANK_MAX_CAPACITY_L",
+        "BOTTOMS_TANK_MAX_CAPACITY_L",
+        "FEED_SUPPLY_FLOW_LPM",
+        "FEED_TANK_HIGH_HIGH",
+        "PRODUCT_EXPORT_FLOW_LPM",
+        "PRODUCT_EXPORT_START_LEVEL",
+        "PRODUCT_EXPORT_STOP_LEVEL",
+    )
+):
+    config_module = reload(config_module)
+
 from distillation.ai_assistant import AIAssistant
-from distillation.config import BOTTOM_TEMP_SETPOINT, HISTORIAN_DB, TOP_TEMP_SETPOINT
 from distillation.faults import FaultManager
 from distillation import historian as historian_module
-from distillation.plc import PLCController
-from distillation.process import ProcessState, derive_column_layer_temperatures, normalize_process_state
-from distillation.tags import TAG_DICTIONARY
+from distillation import plc as plc_module
+from distillation import process as process_module
+from distillation import tags as tags_module
 from distillation import visualization as visualization_module
 
 
-# Streamlit can preserve an older imported module while hot-reloading app.py.
+# Streamlit can preserve older imported modules while hot-reloading app.py.
+if getattr(plc_module, "PLC_CONTROL_REVISION", None) != 3 or not all(
+    name in getattr(plc_module.PLCController, "__dataclass_fields__", {})
+    for name in ("feed_cycle_phase", "distillate_export_running", "bottoms_export_running")
+):
+    plc_module = reload(plc_module)
+if getattr(process_module, "PROCESS_MODEL_REVISION", None) != 3 or not all(
+    name in getattr(process_module.ProcessState, "__dataclass_fields__", {})
+    for name in ("feed_inlet_flow", "distillate_outlet_flow", "bottoms_outlet_flow")
+):
+    process_module = reload(process_module)
+if not all(
+    name in tags_module.TAG_DICTIONARY
+    for name in ("DT101.PV.FEED_INLET_FLOW", "DT101.PV.DISTILLATE_OUTLET_FLOW", "DT101.PV.BOTTOMS_OUTLET_FLOW")
+):
+    tags_module = reload(tags_module)
 if not hasattr(historian_module.Historian, "latest_tick"):
     historian_module = reload(historian_module)
 if getattr(visualization_module, "LAYER_CHART_X_FIELD", None) != "tick":
@@ -27,6 +60,17 @@ if getattr(visualization_module, "LAYER_CHART_X_FIELD", None) != "tick":
 
 Historian = historian_module.Historian
 TagBus = historian_module.TagBus
+PLCController = plc_module.PLCController
+ProcessState = process_module.ProcessState
+derive_column_layer_temperatures = process_module.derive_column_layer_temperatures
+normalize_process_state = process_module.normalize_process_state
+TAG_DICTIONARY = tags_module.TAG_DICTIONARY
+BOTTOM_TEMP_SETPOINT = config_module.BOTTOM_TEMP_SETPOINT
+TOP_TEMP_SETPOINT = config_module.TOP_TEMP_SETPOINT
+HISTORIAN_DB = config_module.HISTORIAN_DB
+FEED_TANK_MAX_CAPACITY_L = config_module.FEED_TANK_MAX_CAPACITY_L
+DISTILLATE_TANK_MAX_CAPACITY_L = config_module.DISTILLATE_TANK_MAX_CAPACITY_L
+BOTTOMS_TANK_MAX_CAPACITY_L = config_module.BOTTOMS_TANK_MAX_CAPACITY_L
 LAYER_TEMPERATURE_TAGS = visualization_module.LAYER_TEMPERATURE_TAGS
 build_layer_temperature_figure = visualization_module.build_layer_temperature_figure
 
@@ -41,6 +85,27 @@ def init_session() -> None:
         st.session_state.state = normalize_process_state(st.session_state.state)
     if "plc" not in st.session_state:
         st.session_state.plc = PLCController(mode="IDLE")
+    elif not all(
+        hasattr(st.session_state.plc, name)
+        for name in (
+            "feed_cycle_phase",
+            "distillate_export_running",
+            "bottoms_export_running",
+            "_product_export_state",
+        )
+    ):
+        stale_plc = st.session_state.plc
+        st.session_state.plc = PLCController(
+            mode=str(getattr(stale_plc, "mode", "IDLE")),
+            top_temp_setpoint=float(getattr(stale_plc, "top_temp_setpoint", TOP_TEMP_SETPOINT)),
+            bottom_temp_setpoint=float(getattr(stale_plc, "bottom_temp_setpoint", BOTTOM_TEMP_SETPOINT)),
+            stable_seconds=float(getattr(stale_plc, "stable_seconds", 0.0)),
+            feed_cycle_phase=(
+                "FILLING_FEED_TANK"
+                if float(st.session_state.state.feed_tank_level) <= 10.0
+                else "FEEDING_COLUMN"
+            ),
+        )
     if "faults" not in st.session_state:
         st.session_state.faults = FaultManager()
     if "bus" not in st.session_state:
@@ -61,6 +126,12 @@ def init_session() -> None:
         st.session_state.bottom_temp_setpoint = BOTTOM_TEMP_SETPOINT
     if "feed_valve_open" not in st.session_state:
         st.session_state.feed_valve_open = True
+    if "feed_supply_run_request" not in st.session_state:
+        st.session_state.feed_supply_run_request = True
+    if "continuous_run" not in st.session_state:
+        st.session_state.continuous_run = False
+    if "continuous_run_skip_next" not in st.session_state:
+        st.session_state.continuous_run_skip_next = False
     if "tick_count" not in st.session_state:
         latest_tick = st.session_state.historian.latest_tick()
         if latest_tick is None:
@@ -85,8 +156,21 @@ def reset_simulation() -> None:
     st.session_state.active_alarms = []
     st.session_state.last_ai_response = "No recommendation requested yet."
     st.session_state.feed_valve_open = True
+    st.session_state.feed_supply_run_request = True
+    st.session_state.continuous_run = False
+    st.session_state.continuous_run_skip_next = False
     st.session_state.tick_count = 0
-    initial_tags = st.session_state.state.to_tags()
+    initial_tags = {
+        **st.session_state.state.to_tags(),
+        "DT101.HMI.FEED_SUPPLY_RUN_REQUEST": True,
+        "DT101.HMI.FEED_VALVE_OPEN_REQUEST": True,
+        "DT101.CMD.FEED_SUPPLY_PUMP": False,
+        "DT101.CMD.FEED_SUPPLY_VALVE": False,
+        "DT101.FB.FEED_SUPPLY_PUMP_RUNNING": False,
+        "DT101.FB.FEED_SUPPLY_VALVE_OPEN": False,
+        "DT101.CMD.FEED_VALVE": 0.0,
+        "DT101.FB.FEED_VALVE_OPEN": False,
+    }
     st.session_state.bus.publish(initial_tags)
     st.session_state.historian.write(
         st.session_state.last_heartbeat,
@@ -122,10 +206,26 @@ def simulation_tick() -> None:
     snapshot["DT101.SP.TOP_TEMP"] = float(st.session_state.top_temp_setpoint)
     snapshot["DT101.SP.BOTTOM_TEMP"] = float(st.session_state.bottom_temp_setpoint)
     snapshot["DT101.HMI.FEED_VALVE_OPEN_REQUEST"] = bool(st.session_state.feed_valve_open)
+    snapshot["DT101.HMI.FEED_SUPPLY_RUN_REQUEST"] = bool(st.session_state.feed_supply_run_request)
+    snapshot["DT101.FB.FEED_VALVE_OPEN"] = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_VALVE_OPEN", False)
+    )
+    snapshot["DT101.FB.FEED_SUPPLY_PUMP_RUNNING"] = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_PUMP_RUNNING", False)
+    )
+    snapshot["DT101.FB.FEED_SUPPLY_VALVE_OPEN"] = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_VALVE_OPEN", False)
+    )
     st.session_state.plc.top_temp_setpoint = float(st.session_state.top_temp_setpoint)
     st.session_state.plc.bottom_temp_setpoint = float(st.session_state.bottom_temp_setpoint)
     plc_output = st.session_state.plc.scan(snapshot, 1.0)
     controls = dict(plc_output.commands)
+    controls["feed_supply_pump_feedback"] = bool(plc_output.commands["feed_supply_pump"])
+    controls["feed_supply_valve_feedback"] = bool(plc_output.commands["feed_supply_valve"])
+    controls["distillate_export_pump_feedback"] = bool(plc_output.commands["distillate_export_pump"])
+    controls["distillate_export_valve_feedback"] = bool(plc_output.commands["distillate_export_valve"])
+    controls["bottoms_export_pump_feedback"] = bool(plc_output.commands["bottoms_export_pump"])
+    controls["bottoms_export_valve_feedback"] = bool(plc_output.commands["bottoms_export_valve"])
     controls["feed_valve_feedback"] = float(plc_output.commands["feed_valve"]) > 0.0
     controls["reflux_valve_feedback"] = faults.get("reflux_valve_stuck_position", plc_output.commands["reflux_valve"])
     controls["last_heartbeat"] = st.session_state.last_heartbeat
@@ -143,6 +243,19 @@ def simulation_tick() -> None:
 
     output_tags = {
         **tags,
+        "DT101.HMI.FEED_SUPPLY_RUN_REQUEST": st.session_state.feed_supply_run_request,
+        "DT101.CMD.FEED_SUPPLY_PUMP": plc_output.commands["feed_supply_pump"],
+        "DT101.CMD.FEED_SUPPLY_VALVE": plc_output.commands["feed_supply_valve"],
+        "DT101.FB.FEED_SUPPLY_PUMP_RUNNING": controls["feed_supply_pump_feedback"],
+        "DT101.FB.FEED_SUPPLY_VALVE_OPEN": controls["feed_supply_valve_feedback"],
+        "DT101.CMD.DISTILLATE_EXPORT_PUMP": plc_output.commands["distillate_export_pump"],
+        "DT101.CMD.DISTILLATE_EXPORT_VALVE": plc_output.commands["distillate_export_valve"],
+        "DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING": controls["distillate_export_pump_feedback"],
+        "DT101.FB.DISTILLATE_EXPORT_VALVE_OPEN": controls["distillate_export_valve_feedback"],
+        "DT101.CMD.BOTTOMS_EXPORT_PUMP": plc_output.commands["bottoms_export_pump"],
+        "DT101.CMD.BOTTOMS_EXPORT_VALVE": plc_output.commands["bottoms_export_valve"],
+        "DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING": controls["bottoms_export_pump_feedback"],
+        "DT101.FB.BOTTOMS_EXPORT_VALVE_OPEN": controls["bottoms_export_valve_feedback"],
         "DT101.CMD.REBOILER_DUTY": plc_output.commands["reboiler_duty"],
         "DT101.HMI.FEED_VALVE_OPEN_REQUEST": st.session_state.feed_valve_open,
         "DT101.CMD.FEED_VALVE": plc_output.commands["feed_valve"],
@@ -170,6 +283,16 @@ def simulation_tick() -> None:
 def toggle_feed_valve() -> None:
     st.session_state.feed_valve_open = not st.session_state.feed_valve_open
     simulation_tick()
+
+
+def toggle_feed_supply() -> None:
+    st.session_state.feed_supply_run_request = not st.session_state.feed_supply_run_request
+    simulation_tick()
+
+
+def toggle_continuous_run() -> None:
+    st.session_state.continuous_run = not st.session_state.continuous_run
+    st.session_state.continuous_run_skip_next = st.session_state.continuous_run
 
 
 def inject_button(label: str, fault_name: str) -> None:
@@ -210,39 +333,80 @@ def get_column_layer_temperatures(state: ProcessState) -> tuple[float, ...]:
 
 
 def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], selected_equipment: str) -> str:
-    alarm_active = bool(alarms)
-    status_color = "#ff5f63" if alarm_active else "#25e6a5"
     pressure_color = "#ff5f63" if state.column_pressure > 125 else "#bff6ff"
     purity_color = "#ffc26b" if state.purity_proxy < 90 else "#bff6ff"
-    active_faults = ", ".join(sorted(st.session_state.faults.active_faults)) or "none"
-    alarms_text = ", ".join(alarms) if alarms else "none"
-    reflux_feedback = st.session_state.bus.tags.get("DT101.FB.REFLUX_VALVE_POSITION", 50)
-    reboiler_duty = st.session_state.bus.tags.get("DT101.CMD.REBOILER_DUTY", 0)
+    heating_duty = float(st.session_state.bus.tags.get("DT101.CMD.REBOILER_DUTY", 0.0))
+    condenser_command = float(st.session_state.bus.tags.get("DT101.CMD.CONDENSER_VALVE", 0.0))
     feed_valve_command = float(
         st.session_state.bus.tags.get(
             "DT101.CMD.FEED_VALVE",
-            50.0 if st.session_state.feed_valve_open else 0.0,
+            0.0,
         )
     )
     feed_valve_open = bool(
         st.session_state.bus.tags.get(
             "DT101.FB.FEED_VALVE_OPEN",
-            st.session_state.feed_valve_open,
+            False,
         )
     )
     feed_valve_class = " open" if feed_valve_open else " closed"
     feed_valve_status = "OPEN" if feed_valve_open else "CLOSED"
+    feed_supply_pump_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_PUMP_RUNNING", False)
+    )
+    feed_supply_valve_open = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_VALVE_OPEN", False)
+    )
+    feed_supply_pump_class = "running" if feed_supply_pump_running else "stopped"
+    feed_supply_valve_class = "open" if feed_supply_valve_open else "closed"
+    feed_supply_pump_status = "RUNNING" if feed_supply_pump_running else "STOPPED"
+    feed_supply_valve_status = "OPEN" if feed_supply_valve_open else "CLOSED"
+    feed_supply_active = feed_supply_pump_running and feed_supply_valve_open
+    distillate_export_pump_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING", False)
+    )
+    distillate_export_valve_open = bool(
+        st.session_state.bus.tags.get("DT101.FB.DISTILLATE_EXPORT_VALVE_OPEN", False)
+    )
+    bottoms_export_pump_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING", False)
+    )
+    bottoms_export_valve_open = bool(
+        st.session_state.bus.tags.get("DT101.FB.BOTTOMS_EXPORT_VALVE_OPEN", False)
+    )
+
+    def device_state(active: bool, running_label: str, stopped_label: str) -> tuple[str, str]:
+        return ("running" if active else "stopped", running_label if active else stopped_label)
+
+    distillate_pump_class, distillate_pump_status = device_state(
+        distillate_export_pump_running, "RUNNING", "STOPPED"
+    )
+    distillate_valve_class, distillate_valve_status = device_state(
+        distillate_export_valve_open, "OPEN", "CLOSED"
+    )
+    bottoms_pump_class, bottoms_pump_status = device_state(
+        bottoms_export_pump_running, "RUNNING", "STOPPED"
+    )
+    bottoms_valve_class, bottoms_valve_status = device_state(
+        bottoms_export_valve_open, "OPEN", "CLOSED"
+    )
+    distillate_export_active = distillate_export_pump_running and distillate_export_valve_open
+    bottoms_export_active = bottoms_export_pump_running and bottoms_export_valve_open
     feed_level = max(0.0, min(100.0, state.feed_tank_level))
-    reflux_level = max(0.0, min(100.0, state.reflux_drum_level))
+    distillate_level = max(0.0, min(100.0, state.distillate_tank_level))
+    bottoms_level = max(0.0, min(100.0, state.bottoms_tank_level))
+    feed_inventory_liters = feed_level / 100.0 * FEED_TANK_MAX_CAPACITY_L
+    distillate_inventory_liters = distillate_level / 100.0 * DISTILLATE_TANK_MAX_CAPACITY_L
+    bottoms_inventory_liters = bottoms_level / 100.0 * BOTTOMS_TANK_MAX_CAPACITY_L
 
     def selected(name: str) -> str:
         return " selected" if selected_equipment == name else ""
 
     layers = get_column_layer_temperatures(state)
     layer_band_html = "\n".join(
-        f"""    <div class="layer-band" style="top:{38 + index * 48}px;">
+        f"""    <div class="layer-band">
       <span>L{7 - index}</span>
-      <b>{temperature:04.1f} C</b>
+      <b>{temperature:04.1f} degC</b>
     </div>"""
         for index, temperature in enumerate(reversed(layers))
     )
@@ -252,57 +416,26 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
 <style>
 .dt101-board {{
   position: relative;
-  min-height: 455px;
-  overflow: hidden;
-  border-radius: 22px;
+  min-height: 425px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 20px;
   border: 1px solid rgba(124, 226, 255, 0.28);
   background:
     linear-gradient(rgba(83, 214, 236, 0.06) 1px, transparent 1px),
     linear-gradient(90deg, rgba(83, 214, 236, 0.06) 1px, transparent 1px),
-    radial-gradient(circle at 42% 35%, rgba(15, 103, 118, 0.74), rgba(5, 26, 37, 0.94) 58%, #020811 100%);
-  background-size: 72px 72px, 72px 72px, 100% 100%;
+    radial-gradient(circle at 42% 42%, rgba(15, 103, 118, 0.68), rgba(5, 26, 37, 0.95) 62%, #020811 100%);
+  background-size: 64px 64px, 64px 64px, 100% 100%;
   color: #d9fbff;
   font-family: "Segoe UI", Arial, sans-serif;
 }}
 .dt101-board * {{ box-sizing: border-box; }}
 .dt101-stage {{
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 1180px;
-  height: 620px;
-  transform: scale(0.62);
-  transform-origin: top left;
-}}
-.dt101-title {{
-  position: absolute; left: 34px; top: 28px;
-  font-size: 28px; font-weight: 800; letter-spacing: 1.2px;
-}}
-.dt101-status {{
-  position: absolute; right: 34px; top: 38px;
-  display: flex; gap: 12px; align-items: center;
-  color: #c9f8ff; font-size: 15px; font-weight: 600;
-}}
-.dt101-dot {{
-  width: 18px; height: 18px; border-radius: 999px;
-  background: {status_color}; box-shadow: 0 0 18px {status_color};
-}}
-.dt101-chip {{
-  position: absolute;
-  padding: 7px 10px;
-  border: 1px solid rgba(95, 224, 242, 0.36);
-  border-radius: 10px;
-  background: rgba(2, 18, 29, 0.76);
-  color: #dffcff;
-  font: 700 12px Consolas, monospace;
-  box-shadow: 0 0 18px rgba(69, 214, 255, 0.12);
-}}
-.dt101-chip span {{
-  display: block;
-  color: #82c9d6;
-  font-size: 10px;
-  font-weight: 500;
-  margin-bottom: 3px;
+  position: relative;
+  width: min(1040px, calc(100% - 32px));
+  min-width: 920px;
+  height: 425px;
+  margin: 0 auto;
 }}
 .dt101-equipment {{
   position: absolute;
@@ -312,42 +445,46 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
 }}
 .dt101-equipment.selected {{
   border-color: #ffe681;
-  box-shadow: 0 0 28px rgba(255, 230, 129, 0.38), inset 0 0 24px rgba(255, 230, 129, 0.08);
+  box-shadow: 0 0 24px rgba(255, 230, 129, 0.34), inset 0 0 20px rgba(255, 230, 129, 0.08);
 }}
-.dt101-label {{
+.equipment-name {{
   position: absolute;
   color: #dffcff;
-  font-size: 13px;
+  font-size: clamp(11px, 1.25vw, 14px);
   font-weight: 800;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.35px;
   text-transform: uppercase;
 }}
-.dt101-small {{
+.equipment-data {{
   position: absolute;
-  color: #9edbe6;
-  font: 700 11px Consolas, monospace;
+  color: #b7edf5;
+  font: 700 clamp(9px, 1vw, 11px) Consolas, monospace;
+  line-height: 1.45;
 }}
-.pipe {{
+.process-line {{
   position: absolute;
   border-radius: 999px;
-  z-index: 2;
-}}
-.pipe.liquid {{
+  z-index: 1;
   background: linear-gradient(90deg, rgba(69,214,255,0.28), #45d6ff);
   box-shadow: 0 0 14px rgba(69,214,255,0.55);
+  color: #45d6ff;
 }}
-.pipe.vapor {{
+.process-line.hot {{
   background: linear-gradient(90deg, rgba(255,173,120,0.24), #ffad78);
   box-shadow: 0 0 14px rgba(255,173,120,0.52);
+  color: #ffad78;
 }}
-.pipe.closed {{
+.process-line.closed {{
   opacity: 0.26;
   filter: grayscale(0.7);
   box-shadow: none;
 }}
-.pipe.h {{ height: 7px; }}
-.pipe.v {{ width: 7px; }}
-.pipe.h.right::after {{
+.process-line.selected {{
+  box-shadow: 0 0 20px rgba(255, 230, 129, 0.72);
+}}
+.process-line.horizontal {{ height: 6px; }}
+.process-line.vertical {{ width: 6px; }}
+.process-line.right::after {{
   content: "";
   position: absolute; right: -10px; top: -5px;
   width: 0; height: 0;
@@ -355,7 +492,7 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
   border-bottom: 8px solid transparent;
   border-left: 12px solid currentColor;
 }}
-.pipe.v.down::after {{
+.process-line.down::after {{
   content: "";
   position: absolute; left: -5px; bottom: -10px;
   width: 0; height: 0;
@@ -363,37 +500,21 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
   border-right: 8px solid transparent;
   border-top: 12px solid currentColor;
 }}
-.liquid {{ color: #45d6ff; }}
-.vapor {{ color: #ffad78; }}
 .column {{
-  left: 180px; top: 112px; width: 138px; height: 420px;
-  border-radius: 62px;
+  left: 42%; top: 48px; width: 17%; height: 300px;
+  border-radius: 56px;
   overflow: hidden;
   background: linear-gradient(135deg, rgba(217,251,255,0.20), rgba(69,214,255,0.08), rgba(3,24,36,0.62));
 }}
-.column::before {{
-  content: "";
-  position: absolute; inset: 22px 18px;
-  border-radius: 44px;
-  background: rgba(217,251,255,0.045);
-}}
-.tray {{
-  position: absolute; left: 22px; right: 22px; height: 2px;
-  background: rgba(217,251,255,0.58);
-}}
-.tray::after {{
-  content: "";
-  position: absolute; left: 12px; right: 12px; top: -10px; height: 20px;
-  border-radius: 999px;
-  border: 1px solid rgba(191,246,255,0.42);
-  background: rgba(191,246,255,0.08);
+.column-layers {{
+  position: absolute;
+  left: 14px; right: 14px; top: 15px; bottom: 58px;
+  display: grid;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 4px;
 }}
 .layer-band {{
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  height: 38px;
-  z-index: 1;
+  min-height: 24px;
   border-top: 1px solid rgba(191,246,255,0.58);
   border-bottom: 1px solid rgba(191,246,255,0.22);
   border-radius: 999px;
@@ -403,23 +524,40 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 8px;
+  padding: 0 9px;
 }}
-.layer-band span {{
-  color: #86d7e5;
+.layer-band span {{ color: #86d7e5; }}
+.layer-band b {{ color: #ffffff; font-size: 10px; }}
+.column-heater {{
+  position: absolute;
+  left: 17px; right: 17px; bottom: 13px; height: 34px;
+  border: 1px solid rgba(255,173,120,0.72);
+  border-radius: 17px;
+  overflow: hidden;
+  background: rgba(37, 24, 24, 0.75);
 }}
-.layer-band b {{
-  color: #ffffff;
-  font-size: 10px;
+.column-heater-fill {{
+  height: 100%;
+  width: {heating_duty:.1f}%;
+  background: linear-gradient(90deg, #45d6ff, #ff7e5f 50%, #ffe29a);
+  box-shadow: 0 0 16px rgba(255,126,95,0.55);
+  opacity: 0.88;
+}}
+.column-heater-label {{
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: white; font: 800 9px Consolas, monospace;
+  text-shadow: 0 1px 3px #000;
 }}
 .feed-tank {{
-  left: 58px; top: 328px; width: 96px; height: 122px;
-  border-radius: 18px;
+  left: 20%; top: 78px; width: 15%; height: 240px;
+  border-radius: 38px;
+  overflow: hidden;
 }}
 .feed-valve {{
   position: absolute;
-  left: 150px;
-  top: 375px;
+  left: 37%;
+  top: 192px;
   width: 46px;
   height: 34px;
   z-index: 4;
@@ -477,20 +615,180 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
 .feed-valve.closed .valve-right {{
   border-right-color: #ffad78;
 }}
+.feed-supply-pump {{
+  position: absolute;
+  left: 3.2%;
+  top: 181px;
+  width: 54px;
+  height: 54px;
+  z-index: 4;
+  border: 3px solid rgba(174,247,255,0.72);
+  border-radius: 50%;
+  background: rgba(8,43,56,0.94);
+  box-shadow: 0 0 14px rgba(69,214,255,0.25), inset 0 0 12px rgba(69,214,255,0.15);
+}}
+.feed-supply-pump.running {{
+  border-color: #25e6a5;
+  box-shadow: 0 0 18px rgba(37,230,165,0.72), inset 0 0 14px rgba(69,214,255,0.24);
+}}
+.feed-supply-pump.stopped {{ opacity: 0.62; }}
+.pump-rotor {{
+  position: absolute;
+  inset: 5px;
+  border: 2px solid rgba(191,246,255,0.72);
+  border-radius: 50%;
+}}
+.pump-hub {{
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 12px; height: 12px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #dffcff;
+  box-shadow: 0 0 7px rgba(69,214,255,0.85);
+}}
+.pump-blade {{
+  position: absolute;
+  left: 17px; top: 2px;
+  width: 6px; height: 18px;
+  transform-origin: 3px 18px;
+  border-radius: 5px;
+  background: linear-gradient(#ffffff, #45d6ff);
+}}
+.pump-blade:nth-child(2) {{ transform: rotate(120deg); }}
+.pump-blade:nth-child(3) {{ transform: rotate(240deg); }}
+@keyframes pump-rotation {{
+  to {{ transform: rotate(360deg); }}
+}}
+.feed-supply-pump.running .pump-rotor {{
+  animation: pump-rotation 1.1s linear infinite;
+}}
+.product-export-pump {{
+  position: absolute;
+  width: 54px;
+  height: 54px;
+  z-index: 4;
+  border: 3px solid rgba(174,247,255,0.72);
+  border-radius: 50%;
+  background: rgba(8,43,56,0.94);
+  box-shadow: 0 0 14px rgba(69,214,255,0.25), inset 0 0 12px rgba(69,214,255,0.15);
+}}
+.product-export-pump.running {{
+  border-color: #25e6a5;
+  box-shadow: 0 0 18px rgba(37,230,165,0.72), inset 0 0 14px rgba(69,214,255,0.24);
+}}
+.product-export-pump.stopped {{ opacity: 0.62; }}
+.product-export-pump.running .pump-rotor {{
+  animation: pump-rotation 1.1s linear infinite;
+}}
+.distillate-export-pump {{ left: 87.5%; top: 79px; }}
+.bottoms-export-pump {{ left: 78%; top: 278px; }}
+.product-export-valve {{
+  position: absolute;
+  width: 46px;
+  height: 34px;
+  z-index: 4;
+}}
+.distillate-export-valve {{ left: 94%; top: 89px; }}
+.bottoms-export-valve {{ left: 85%; top: 288px; }}
+.product-export-valve .valve-line {{
+  position: absolute; left: 0; right: 0; top: 16px; height: 2px;
+  background: rgba(232,255,255,0.90);
+}}
+.product-export-valve .valve-left,
+.product-export-valve .valve-right {{
+  position: absolute; top: 8px; width: 0; height: 0;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+  filter: drop-shadow(0 0 4px rgba(69,214,255,0.65));
+}}
+.product-export-valve .valve-left {{ left: 8px; border-left: 15px solid #f7ffff; }}
+.product-export-valve .valve-right {{ right: 8px; border-right: 15px solid #f7ffff; }}
+.product-export-valve .valve-stem {{
+  position: absolute; left: 22px; top: 0; width: 2px; height: 10px;
+  background: rgba(232,255,255,0.90);
+}}
+.product-export-valve.running .valve-left,
+.product-export-valve.running .valve-right {{
+  filter: drop-shadow(0 0 8px rgba(37,230,165,0.95));
+}}
+.product-export-valve.stopped {{ opacity: 0.55; }}
+.product-export-valve.stopped .valve-line,
+.product-export-valve.stopped .valve-stem {{ background: rgba(255,173,120,0.70); }}
+.product-export-valve.stopped .valve-left {{ border-left-color: #ffad78; }}
+.product-export-valve.stopped .valve-right {{ border-right-color: #ffad78; }}
+.product-export-pump.selected,
+.product-export-valve.selected {{
+  filter: drop-shadow(0 0 9px rgba(255,230,129,0.85));
+}}
+.feed-supply-valve {{
+  position: absolute;
+  left: 12.2%;
+  top: 192px;
+  width: 46px;
+  height: 34px;
+  z-index: 4;
+}}
+.feed-supply-valve .valve-line {{
+  position: absolute; left: 0; right: 0; top: 16px; height: 2px;
+  background: rgba(232,255,255,0.90);
+}}
+.feed-supply-valve .valve-left,
+.feed-supply-valve .valve-right {{
+  position: absolute; top: 8px; width: 0; height: 0;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+  filter: drop-shadow(0 0 4px rgba(69,214,255,0.65));
+}}
+.feed-supply-valve .valve-left {{ left: 8px; border-left: 15px solid #f7ffff; }}
+.feed-supply-valve .valve-right {{ right: 8px; border-right: 15px solid #f7ffff; }}
+.feed-supply-valve .valve-stem {{
+  position: absolute; left: 22px; top: 0; width: 2px; height: 10px;
+  background: rgba(232,255,255,0.90);
+}}
+.feed-supply-valve.open .valve-left,
+.feed-supply-valve.open .valve-right {{
+  filter: drop-shadow(0 0 8px rgba(37,230,165,0.95));
+}}
+.feed-supply-valve.closed {{ opacity: 0.55; }}
+.feed-supply-valve.closed .valve-line,
+.feed-supply-valve.closed .valve-stem {{ background: rgba(255,173,120,0.70); }}
+.feed-supply-valve.closed .valve-left {{ border-left-color: #ffad78; }}
+.feed-supply-valve.closed .valve-right {{ border-right-color: #ffad78; }}
+.feed-supply-pump.selected,
+.feed-supply-valve.selected {{
+  filter: drop-shadow(0 0 9px rgba(255,230,129,0.85));
+}}
 .tank-fill {{
-  position: absolute; left: 14px; right: 14px; bottom: 12px;
+  position: absolute; left: 12px; right: 12px; bottom: 12px;
   height: {feed_level:.1f}%;
-  max-height: 92px;
-  border-radius: 12px;
+  max-height: 210px;
+  border-radius: 28px;
   background: linear-gradient(#45d6ff, #2479c8);
   opacity: 0.38;
 }}
+.tank-percent {{
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font: 800 16px Consolas, monospace;
+  text-shadow: 0 2px 5px #00141e;
+}}
+.tank-details {{
+  position: absolute;
+  color: #b7edf5;
+  font: 700 10px/1.45 Consolas, monospace;
+}}
 .condenser {{
-  left: 620px; top: 100px; width: 168px; height: 58px;
+  left: 61%; top: 67px; width: 13%; height: 72px;
   border-radius: 34px;
 }}
 .condenser::before, .condenser::after {{
-  content: ""; position: absolute; top: -2px; width: 20px; height: 58px;
+  content: ""; position: absolute; top: -2px; width: 18px; height: 72px;
   border-radius: 999px; border: 1px solid rgba(174,247,255,0.72);
   background: rgba(217,251,255,0.07);
 }}
@@ -500,186 +798,163 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
   position: absolute; top: 12px; bottom: 12px; width: 2px;
   background: rgba(174,247,255,0.55);
 }}
-.storage {{
-  left: 636px; top: 258px; width: 112px; height: 92px;
-  border-radius: 30px;
-}}
-.storage-fill {{
-  position: absolute; left: 16px; right: 16px; bottom: 12px;
-  height: {reflux_level:.1f}%;
-  max-height: 64px;
-  border-radius: 18px;
-  background: linear-gradient(#45d6ff, #2479c8);
-  opacity: 0.32;
-}}
-.preheater {{
-  left: 406px; top: 468px; width: 140px; height: 54px;
-  border-radius: 22px;
-}}
-.preheater::after {{
-  content: "";
-  position: absolute; left: 20px; right: 20px; top: 25px;
-  height: 2px; background: rgba(174,247,255,0.76);
-  box-shadow: 20px -12px 0 -1px rgba(255,173,120,0.55), 52px 12px 0 -1px rgba(255,173,120,0.55);
-  transform: skewX(-22deg);
-}}
-.pump {{
-  left: 576px; top: 494px; width: 134px; height: 72px;
-  border: none; background: transparent; box-shadow: none;
-}}
-.pump .wheel {{
-  position: absolute; top: 8px; width: 58px; height: 58px;
-  border-radius: 50%;
-  border: 2px solid rgba(174,247,255,0.75);
-  background: rgba(8,43,56,0.72);
-}}
-.pump .wheel.left {{ left: 0; }}
-.pump .wheel.right {{ right: 0; }}
-.pump .motor {{
-  position: absolute; left: 52px; top: 20px; width: 48px; height: 34px;
-  border-radius: 8px; border: 2px solid rgba(174,247,255,0.62);
-  background: rgba(8,43,56,0.78);
-}}
-.reboiler {{
-  left: 838px; top: 458px; width: 198px; height: 82px;
-  border-color: rgba(255,173,120,0.70);
-  border-radius: 42px;
-}}
-.flame {{
-  position: absolute; left: 36px; right: 36px; top: 30px; height: 22px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #45d6ff, #ff7e5f 45%, #ffe29a);
-  box-shadow: 0 0 18px rgba(255,126,95,0.52);
-}}
-.product-box {{
+.product-card {{
   position: absolute;
-  width: 92px; height: 62px;
   border: 2px solid rgba(174,247,255,0.62);
-  border-radius: 14px;
+  border-radius: 18px;
   background: rgba(8,43,56,0.66);
+  overflow: hidden;
 }}
-.section-marker {{
-  position: absolute; left: 30px; top: 120px; width: 124px; height: 420px;
-  border-left: 2px solid rgba(191,246,255,0.58);
+.product-card.selected {{
+  border-color: #ffe681;
+  box-shadow: 0 0 24px rgba(255, 230, 129, 0.34);
 }}
-.section-marker::before, .section-marker::after {{
-  content: ""; position: absolute; left: 0; width: 18px;
-  border-top: 2px solid rgba(191,246,255,0.58);
-}}
-.section-marker::before {{ top: 0; }}
-.section-marker::after {{ bottom: 0; }}
-.dt101-footer {{
-  position: absolute; left: 34px; right: 34px; bottom: 22px;
-  color: #b7edf5;
-  font: 700 12px Consolas, monospace;
-  display: flex; justify-content: space-between; gap: 16px;
-  border-top: 1px solid rgba(124,226,255,0.16);
-  padding-top: 14px;
+.distillate-product {{ left: 75%; top: 48px; width: 11%; height: 118px; }}
+.bottom-product {{ left: 62%; top: 260px; width: 14%; height: 90px; }}
+.bottom-product-route {{ left: 50%; top: 344px; width: 12%; }}
+.product-fill {{
+  position: absolute; left: 0; right: 0; bottom: 0;
+  border-radius: 0 0 16px 16px;
+  background: linear-gradient(rgba(69,214,255,0.20), rgba(36,121,200,0.38));
+  z-index: 0;
 }}
 </style>
 
 <div class="dt101-board">
   <div class="dt101-stage">
-  <div class="dt101-title">DT101 DISTILLATION DIGITAL TWIN</div>
-  <div class="dt101-status"><div class="dt101-dot"></div><div>{'Alarm active' if alarm_active else 'Connected'}</div></div>
-
-  <div class="section-marker"></div>
-  <div class="dt101-label" style="left:54px; top:102px;">Distillation<br/>Column</div>
-  <div class="dt101-label" style="left:54px; top:238px;">Rectifying<br/>section</div>
-  <div class="dt101-label" style="left:72px; top:354px;">Feed tray</div>
-  <div class="dt101-label" style="left:62px; top:470px;">Stripping<br/>section</div>
-
-  <div class="dt101-equipment feed-tank{selected('Feed system')}">
-    <div class="tank-fill"></div>
+  <div class="equipment-name" style="left:1%; top:150px;">Input</div>
+  <div class="process-line horizontal right{selected('Feed system')}{'' if feed_supply_active else ' closed'}" style="left:0; top:208px; width:20%;"></div>
+  <div class="feed-supply-pump {feed_supply_pump_class}{selected('Feed system')}" title="P-100 {feed_supply_pump_status}">
+    <div class="pump-rotor">
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-hub"></span>
+    </div>
   </div>
-  <div class="dt101-label" style="left:70px; top:462px;">Feed tank</div>
-  <div class="dt101-small" style="left:74px; top:486px;">LT-100 {state.feed_tank_level:04.1f}%</div>
-
-  <div class="dt101-equipment column{selected('Column')}">
-{layer_band_html}
-  </div>
-
-  <div class="pipe h liquid right{'' if feed_valve_open else ' closed'}" style="left:154px; top:388px; width:28px;"></div>
-  <div class="feed-valve{feed_valve_class}" title="Feed valve V-100 {feed_valve_status}">
+  <div class="feed-supply-valve {feed_supply_valve_class}{selected('Feed system')}" title="V-099 {feed_supply_valve_status}">
     <div class="valve-line"></div>
     <div class="valve-stem"></div>
     <div class="valve-left"></div>
     <div class="valve-right"></div>
   </div>
-  <div class="dt101-label" style="left:66px; top:368px;">Feed</div>
-  <div class="dt101-small" style="left:56px; top:410px;">FT-101 {state.feed_flow:04.1f} L/min</div>
-  <div class="dt101-small" style="left:148px; top:414px;">V-100 {feed_valve_status} {feed_valve_command:04.1f}%</div>
+  <div class="equipment-data" style="left:1%; top:245px;">
+    P-100 {feed_supply_pump_status}<br/>
+    V-099 {feed_supply_valve_status}<br/>
+    Inlet flow {state.feed_inlet_flow:04.1f} L/min
+  </div>
 
-  <div class="pipe v vapor down" style="left:246px; top:86px; height:30px;"></div>
-  <div class="pipe h vapor right" style="left:249px; top:86px; width:370px;"></div>
-  <div class="dt101-label" style="left:418px; top:58px; color:#ffd1b7;">Vapor</div>
+  <div class="equipment-name" style="left:22%; top:48px;">Feed tank</div>
+  <div class="dt101-equipment feed-tank{selected('Feed system')}">
+    <div class="tank-fill"></div>
+    <div class="tank-percent">{feed_level:.1f}%</div>
+  </div>
+  <div class="tank-details" style="left:20%; top:326px;">
+    Maximum capacity {FEED_TANK_MAX_CAPACITY_L:.0f} L<br/>
+    Current capacity {feed_inventory_liters:.1f} L<br/>
+    Light fraction {state.feed_composition_light:.2f}<br/>
+    Feed flow {state.feed_flow:04.1f} L/min
+  </div>
+
+  <div class="dt101-equipment column{selected('Column')}">
+    <div class="column-layers">
+{layer_band_html}
+    </div>
+    <div class="column-heater{selected('Column')}">
+      <div class="column-heater-fill"></div>
+      <div class="column-heater-label">Column heating duty {heating_duty:.1f}%</div>
+    </div>
+  </div>
+  <div class="equipment-name" style="left:46%; top:18px;">Column</div>
+  <div class="equipment-data" style="left:42%; top:360px; color:{pressure_color};">Pressure {state.column_pressure:05.1f} kPa</div>
+
+  <div class="process-line horizontal right{selected('Feed system')}{'' if feed_valve_open else ' closed'}" style="left:35%; top:208px; width:7%;"></div>
+  <div class="feed-valve{feed_valve_class}{selected('Feed system')}" title="V-100 {feed_valve_status}">
+    <div class="valve-line"></div>
+    <div class="valve-stem"></div>
+    <div class="valve-left"></div>
+    <div class="valve-right"></div>
+  </div>
+  <div class="equipment-data" style="left:35.5%; top:232px;">V-100 {feed_valve_status}</div>
+
+  <div class="process-line horizontal hot right{selected('Column')}" style="left:50%; top:86px; width:15%;"></div>
+  <div class="process-line vertical hot{selected('Column')}" style="left:50%; top:86px; height:18px;"></div>
 
   <div class="dt101-equipment condenser{selected('Condenser')}">
-    <div class="coil" style="left:38px;"></div>
-    <div class="coil" style="left:70px;"></div>
-    <div class="coil" style="left:102px;"></div>
-    <div class="coil" style="left:134px;"></div>
+    <div class="coil" style="left:25%;"></div>
+    <div class="coil" style="left:42%;"></div>
+    <div class="coil" style="left:59%;"></div>
+    <div class="coil" style="left:76%;"></div>
   </div>
-  <div class="dt101-label" style="left:654px; top:64px;">Total condenser</div>
-  <div class="pipe h liquid right" style="left:788px; top:128px; width:275px;"></div>
-  <div class="dt101-label" style="left:972px; top:100px;">Top product</div>
-  <div class="product-box" style="left:1050px; top:108px;"></div>
+  <div class="equipment-name" style="left:63%; top:38px;">Condenser</div>
+  <div class="equipment-data" style="left:61%; top:150px;">Valve {condenser_command:.1f}%<br/>Cooling water {state.cooling_water_flow:.1f} L/min</div>
+  <div class="process-line horizontal right{selected('Condenser')}" style="left:74%; top:101px; width:1%;"></div>
 
-  <div class="pipe v liquid down" style="left:698px; top:158px; height:92px;"></div>
-  <div class="pipe h liquid right" style="left:630px; top:250px; width:68px; transform:rotate(180deg);"></div>
-  <div class="dt101-equipment storage{selected('Reflux drum')}">
-    <div class="storage-fill"></div>
+  <div class="equipment-name" style="left:75%; top:20px;">Distillate product</div>
+  <div class="product-card distillate-product{selected('Products')}">
+    <div class="product-fill" style="height:{distillate_level:.1f}%;"></div>
+    <div class="tank-percent">{distillate_level:.1f}%</div>
   </div>
-  <div class="dt101-label" style="left:650px; top:360px;">Storage tank</div>
-  <div class="dt101-small" style="left:654px; top:386px;">LT-101 {state.reflux_drum_level:04.1f}%</div>
-
-  <div class="pipe h liquid" style="left:544px; top:304px; width:92px;"></div>
-  <div class="pipe v liquid down" style="left:544px; top:304px; height:198px;"></div>
-  <div class="pipe h liquid right" style="left:360px; top:502px; width:184px; transform:rotate(180deg);"></div>
-  <div class="dt101-equipment preheater{selected('Feed system')}"></div>
-  <div class="dt101-label" style="left:414px; top:438px;">Feed preheater</div>
-
-  <div class="dt101-equipment pump{selected('Reflux valve')}">
-    <div class="wheel left"></div>
-    <div class="motor"></div>
-    <div class="wheel right"></div>
+  <div class="tank-details" style="left:75%; top:176px;">
+    Maximum capacity {DISTILLATE_TANK_MAX_CAPACITY_L:.0f} L<br/>
+    Current capacity {distillate_inventory_liters:.1f} L<br/>
+    Inflow {state.distillate_flow:.2f} L/min<br/>
+    <span style="color:{purity_color};">Purity {state.purity_proxy:.1f}%</span>
   </div>
-  <div class="dt101-label" style="left:572px; top:468px;">Reflux pump</div>
-  <div class="dt101-small" style="left:574px; top:574px;">V-101 FB {reflux_feedback:04.1f}%</div>
-
-  <div class="pipe h liquid right" style="left:258px; top:556px; width:760px;"></div>
-  <div class="pipe v liquid down" style="left:258px; top:532px; height:24px;"></div>
-  <div class="dt101-label" style="left:386px; top:578px;">Liquid</div>
-
-  <div class="pipe h liquid right" style="left:318px; top:432px; width:110px;"></div>
-  <div class="pipe v liquid down" style="left:428px; top:432px; height:70px;"></div>
-  <div class="pipe h vapor right" style="left:318px; top:314px; width:190px;"></div>
-  <div class="pipe v vapor down" style="left:508px; top:314px; height:166px;"></div>
-  <div class="pipe h vapor right" style="left:508px; top:480px; width:330px;"></div>
-  <div class="dt101-label" style="left:410px; top:288px; color:#ffd1b7;">Vapor</div>
-
-  <div class="dt101-equipment reboiler{selected('Reboiler')}">
-    <div class="flame"></div>
+  <div class="process-line horizontal right{selected('Products')}{'' if distillate_export_active else ' closed'}" style="left:86%; top:104px; width:14%;"></div>
+  <div class="product-export-pump {distillate_pump_class} distillate-export-pump{selected('Products')}" title="P-201 {distillate_pump_status}">
+    <div class="pump-rotor">
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-hub"></span>
+    </div>
   </div>
-  <div class="dt101-label" style="left:920px; top:430px;">Reboiler</div>
-  <div class="pipe h vapor right" style="left:1034px; top:486px; width:76px;"></div>
-  <div class="dt101-label" style="left:1076px; top:462px; color:#ffd1b7;">Steam</div>
-  <div class="pipe h liquid right" style="left:1034px; top:526px; width:54px; transform:rotate(180deg);"></div>
-  <div class="dt101-label" style="left:1052px; top:548px;">Condensate</div>
-  <div class="dt101-label" style="left:1014px; top:582px;">Bottom<br/>product</div>
-
-  <div class="dt101-chip" style="left:294px; top:92px;"><span>TT-101</span>{state.top_temperature:04.1f} C</div>
-  <div class="dt101-chip" style="left:360px; top:334px;"><span>PT-101</span><span style="color:{pressure_color}; font-size:13px; font-weight:800;">{state.column_pressure:05.1f} kPa</span></div>
-  <div class="dt101-chip" style="left:820px; top:176px;"><span>QI-101 quality</span><span style="color:{purity_color}; font-size:13px; font-weight:800;">{state.purity_proxy:05.1f} %</span></div>
-  <div class="dt101-chip" style="left:760px; top:382px;"><span>FR-101 reflux</span>{state.reflux_flow:05.2f} L/min</div>
-  <div class="dt101-chip" style="left:850px; top:552px;"><span>REB-101 duty</span>{reboiler_duty:04.1f} %</div>
+  <div class="product-export-valve {distillate_valve_class} distillate-export-valve{selected('Products')}" title="V-201 {distillate_valve_status}">
+    <div class="valve-line"></div>
+    <div class="valve-stem"></div>
+    <div class="valve-left"></div>
+    <div class="valve-right"></div>
+  </div>
+  <div class="equipment-data" style="left:87%; top:142px;">
+    P-201 {distillate_pump_status}<br/>
+    V-201 {distillate_valve_status}<br/>
+    Outlet flow {state.distillate_outlet_flow:.1f} L/min<br/>
+    Auto: &gt;60% ON / &lt;10% OFF
   </div>
 
-  <div class="dt101-footer">
-    <div>Mode: {mode}</div>
-    <div>Focus: {selected_equipment}</div>
-    <div>Faults: {active_faults}</div>
-    <div>Alarms: {alarms_text}</div>
+  <div class="process-line horizontal right bottom-product-route{selected('Products')}"></div>
+  <div class="equipment-name" style="left:62%; top:232px;">Bottom product</div>
+  <div class="product-card bottom-product{selected('Products')}">
+    <div class="product-fill" style="height:{bottoms_level:.1f}%;"></div>
+    <div class="tank-percent">{bottoms_level:.1f}%</div>
+  </div>
+  <div class="tank-details" style="left:62%; top:358px;">
+    Maximum capacity {BOTTOMS_TANK_MAX_CAPACITY_L:.0f} L<br/>
+    Current capacity {bottoms_inventory_liters:.1f} L<br/>
+    Inflow {state.bottoms_flow:.2f} L/min
+  </div>
+  <div class="process-line horizontal right{selected('Products')}{'' if bottoms_export_active else ' closed'}" style="left:76%; top:302px; width:24%;"></div>
+  <div class="product-export-pump {bottoms_pump_class} bottoms-export-pump{selected('Products')}" title="P-202 {bottoms_pump_status}">
+    <div class="pump-rotor">
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-blade"></span>
+      <span class="pump-hub"></span>
+    </div>
+  </div>
+  <div class="product-export-valve {bottoms_valve_class} bottoms-export-valve{selected('Products')}" title="V-202 {bottoms_valve_status}">
+    <div class="valve-line"></div>
+    <div class="valve-stem"></div>
+    <div class="valve-left"></div>
+    <div class="valve-right"></div>
+  </div>
+  <div class="equipment-data" style="left:78%; top:342px;">
+    P-202 {bottoms_pump_status}<br/>
+    V-202 {bottoms_valve_status}<br/>
+    Outlet flow {state.bottoms_outlet_flow:.1f} L/min<br/>
+    Auto: &gt;60% ON / &lt;10% OFF
+  </div>
   </div>
 </div>
 </div>
@@ -687,22 +962,39 @@ def process_overview_svg(state: ProcessState, mode: str, alarms: list[str], sele
 
 
 def equipment_profile(state: ProcessState, selected: str) -> dict[str, object]:
+    feed_supply_pump_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_PUMP_RUNNING", False)
+    )
+    feed_supply_valve_open = bool(
+        st.session_state.bus.tags.get("DT101.FB.FEED_SUPPLY_VALVE_OPEN", False)
+    )
     feed_valve_command = float(
         st.session_state.bus.tags.get(
             "DT101.CMD.FEED_VALVE",
-            50.0 if st.session_state.feed_valve_open else 0.0,
+            0.0,
         )
     )
     feed_valve_feedback = bool(
         st.session_state.bus.tags.get(
             "DT101.FB.FEED_VALVE_OPEN",
-            st.session_state.feed_valve_open,
+            False,
         )
+    )
+    heating_duty = float(st.session_state.bus.tags.get("DT101.CMD.REBOILER_DUTY", 0.0))
+    condenser_command = float(st.session_state.bus.tags.get("DT101.CMD.CONDENSER_VALVE", 0.0))
+    distillate_export_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING", False)
+    )
+    bottoms_export_running = bool(
+        st.session_state.bus.tags.get("DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING", False)
     )
     profiles: dict[str, dict[str, object]] = {
         "Feed system": {
             "role": "Supplies the binary mixture into the column and creates the main process load.",
             "watch": {
+                "Input pump P-100": "RUNNING" if feed_supply_pump_running else "STOPPED",
+                "Input valve V-099": "OPEN" if feed_supply_valve_open else "CLOSED",
+                "Feed inlet flow": f"{state.feed_inlet_flow:.2f} L/min",
                 "Feed tank level": f"{state.feed_tank_level:.1f} %",
                 "Feed valve V-100": "OPEN" if feed_valve_feedback else "CLOSED",
                 "Feed valve command": f"{feed_valve_command:.1f} %",
@@ -714,56 +1006,38 @@ def equipment_profile(state: ProcessState, selected: str) -> dict[str, object]:
         },
         "Column": {
             "role": "Performs vapor-liquid contacting so light material enriches overhead and heavy material enriches bottoms.",
-            "watch": column_layer_watch_values(state),
-            "control": "Pressure, reflux, and reboiler duty shape the temperature profile.",
+            "watch": {
+                **column_layer_watch_values(state),
+                "Pressure": f"{state.column_pressure:.1f} kPa",
+                "Column heating duty": f"{heating_duty:.1f} %",
+            },
+            "control": "Pressure, reflux, and column heating duty shape the temperature profile.",
             "fault_link": "Top temperature sensor drift is detected by inconsistency with pressure, reflux flow, and purity proxy.",
         },
         "Condenser": {
             "role": "Removes overhead heat, condenses vapor, and helps control column pressure.",
             "watch": {
+                "Condenser valve command": f"{condenser_command:.1f} %",
                 "Cooling water flow": f"{state.cooling_water_flow:.2f} L/min",
                 "Column pressure": f"{state.column_pressure:.1f} kPa",
             },
             "control": "PIC101 adjusts condenser valve opening to stabilize pressure.",
             "fault_link": "Insufficient cooling would raise pressure and can lead to safety interlock action.",
         },
-        "Reflux drum": {
-            "role": "Buffers condensed liquid before splitting it into distillate product and reflux return.",
-            "watch": {
-                "Reflux drum level": f"{state.reflux_drum_level:.1f} %",
-                "Distillate flow": f"{state.distillate_flow:.2f} L/min",
-                "Reflux flow": f"{state.reflux_flow:.2f} L/min",
-            },
-            "control": "LIC101 adjusts distillate valve to keep reflux drum level near setpoint.",
-            "fault_link": "A level excursion can indicate imbalance between condensation, reflux, and product withdrawal.",
-        },
-        "Reflux valve": {
-            "role": "Returns liquid to the column top to improve separation quality.",
-            "watch": {
-                "Reflux flow": f"{state.reflux_flow:.2f} L/min",
-                "Purity proxy": f"{state.purity_proxy:.1f} %",
-            },
-            "control": "TIC102 adjusts reflux valve based on top temperature / purity proxy.",
-            "fault_link": "Reflux valve stuck is detected by command-feedback mismatch and low reflux flow.",
-        },
-        "Reboiler": {
-            "role": "Adds heat at the column bottom to generate boil-up vapor.",
-            "watch": {
-                "Bottom temperature": f"{state.bottom_temperature:.1f} degC",
-                "Bottom sump level": f"{state.bottom_sump_level:.1f} %",
-                "Pressure": f"{state.column_pressure:.1f} kPa",
-            },
-            "control": "TIC101 adjusts reboiler duty; safety interlock cuts duty on high-high pressure or low-low bottom level.",
-            "fault_link": "Excess duty can increase pressure; dry heating must be prevented by PLC interlock.",
-        },
         "Products": {
             "role": "Collects distillate overhead product and bottoms heavy product.",
             "watch": {
-                "Distillate tank": f"{state.distillate_tank_level:.1f} %",
-                "Bottoms tank": f"{state.bottoms_tank_level:.1f} %",
+                "Distillate inflow": f"{state.distillate_flow:.2f} L/min",
+                "Distillate tank level": f"{state.distillate_tank_level:.1f} %",
+                "Distillate export P-201 / V-201": "RUNNING / OPEN" if distillate_export_running else "STOPPED / CLOSED",
+                "Distillate outlet flow": f"{state.distillate_outlet_flow:.2f} L/min",
+                "Bottoms inflow": f"{state.bottoms_flow:.2f} L/min",
+                "Bottoms tank level": f"{state.bottoms_tank_level:.1f} %",
+                "Bottoms export P-202 / V-202": "RUNNING / OPEN" if bottoms_export_running else "STOPPED / CLOSED",
+                "Bottoms outlet flow": f"{state.bottoms_outlet_flow:.2f} L/min",
                 "Purity proxy": f"{state.purity_proxy:.1f} %",
             },
-            "control": "Distillate and bottoms valves balance inventory while product quality is monitored.",
+            "control": "Automatic export units start above 60% tank level and stop below 10% using PLC hysteresis.",
             "fault_link": "Off-spec product can be inferred from purity proxy and temperature profile deviation.",
         },
     }
@@ -771,6 +1045,21 @@ def equipment_profile(state: ProcessState, selected: str) -> dict[str, object]:
 
 
 init_session()
+
+
+@st.fragment(run_every=0.5 if st.session_state.continuous_run else None)
+def continuous_simulation_fragment(tick_batch: int) -> None:
+    if not st.session_state.continuous_run:
+        return
+    if st.session_state.continuous_run_skip_next:
+        st.session_state.continuous_run_skip_next = False
+        return
+    for _ in range(int(tick_batch)):
+        simulation_tick()
+    # A fragment rerun cannot redraw the process overview outside this fragment.
+    # Skip the immediate fragment call during the requested full-app rerun.
+    st.session_state.continuous_run_skip_next = True
+    st.rerun(scope="app")
 
 st.title("DT101 Chemical Distillation Column Digital Twin")
 st.caption("Simplified binary distillation column with PLC-style control, local historian, fault injection, and DeepSeek operator assistance.")
@@ -801,16 +1090,30 @@ with st.sidebar:
         key="top_temp_setpoint",
         help="Operator-adjustable top-column process temperature used as the live top PV.",
     )
-    feed_valve_status = "OPEN" if st.session_state.feed_valve_open else "CLOSED"
-    st.caption(f"Feed valve V-100: {feed_valve_status}")
+    feed_supply_status = "ENABLED" if st.session_state.feed_supply_run_request else "DISABLED"
+    st.caption(f"Input supply auto P-100 / V-099: {feed_supply_status}")
     st.button(
-        "Close feed valve V-100" if st.session_state.feed_valve_open else "Open feed valve V-100",
+        "Disable input supply auto P-100 / V-099"
+        if st.session_state.feed_supply_run_request
+        else "Enable input supply auto P-100 / V-099",
+        use_container_width=True,
+        on_click=toggle_feed_supply,
+    )
+    feed_valve_status = "ENABLED" if st.session_state.feed_valve_open else "DISABLED"
+    st.caption(f"Feed valve V-100 auto: {feed_valve_status}")
+    st.button(
+        "Disable feed valve V-100 auto" if st.session_state.feed_valve_open else "Enable feed valve V-100 auto",
         use_container_width=True,
         on_click=toggle_feed_valve,
     )
     if st.button("Run selected ticks", type="primary", use_container_width=True):
         for _ in range(ticks):
             simulation_tick()
+    st.button(
+        "Stop continuous run" if st.session_state.continuous_run else "Start continuous run",
+        use_container_width=True,
+        on_click=toggle_continuous_run,
+    )
     if st.button("Single PLC scan + process tick", use_container_width=True):
         simulation_tick()
     if st.button("Reset simulation", use_container_width=True):
@@ -823,6 +1126,7 @@ with st.sidebar:
     inject_button("data staleness", "data_stale")
     if st.button("Clear all faults", use_container_width=True):
         st.session_state.faults.clear_all()
+    continuous_simulation_fragment(ticks)
 
 state = state_with_manual_temperatures(
     st.session_state.state,
@@ -875,7 +1179,9 @@ st.markdown(
 )
 
 st.subheader("Interactive process overview")
-equipment_options = ["Feed system", "Column", "Condenser", "Reflux drum", "Reflux valve", "Reboiler", "Products"]
+equipment_options = ["Feed system", "Column", "Condenser", "Products"]
+if st.session_state.selected_equipment not in equipment_options:
+    st.session_state.selected_equipment = "Column"
 st.session_state.selected_equipment = st.radio(
     "Focus equipment",
     equipment_options,
