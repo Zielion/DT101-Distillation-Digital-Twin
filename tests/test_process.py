@@ -4,6 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from distillation import process
+from distillation.config import (
+    BOTTOMS_TANK_MAX_CAPACITY_L,
+    DISTILLATE_TANK_MAX_CAPACITY_L,
+    FEED_TANK_MAX_CAPACITY_L,
+)
 from distillation.process import ProcessState, derive_column_layer_temperatures
 
 
@@ -217,6 +222,59 @@ def test_fully_open_feed_valve_produces_twenty_liters_per_minute():
     assert next_state.feed_flow == 20.0
 
 
+def test_product_tank_volume_gain_tracks_feed_tank_volume_loss_within_ten_percent():
+    state = ProcessState(
+        feed_tank_level=80.0,
+        distillate_tank_level=20.0,
+        bottoms_tank_level=20.0,
+    )
+
+    next_state = state.step(
+        {
+            "feed_pump": True,
+            "feed_valve": 50.0,
+            "distillate_valve": 50.0,
+            "bottoms_valve": 50.0,
+        },
+        {},
+        1.0,
+    )
+
+    feed_volume_loss = (
+        state.feed_tank_level - next_state.feed_tank_level
+    ) / 100.0 * FEED_TANK_MAX_CAPACITY_L
+    product_volume_gain = (
+        (next_state.distillate_tank_level - state.distillate_tank_level)
+        / 100.0
+        * DISTILLATE_TANK_MAX_CAPACITY_L
+        + (next_state.bottoms_tank_level - state.bottoms_tank_level)
+        / 100.0
+        * BOTTOMS_TANK_MAX_CAPACITY_L
+    )
+
+    assert next_state.distillate_flow + next_state.bottoms_flow == pytest.approx(
+        next_state.feed_flow * 0.95
+    )
+    assert product_volume_gain == pytest.approx(feed_volume_loss * 0.95)
+    assert abs(product_volume_gain - feed_volume_loss) / feed_volume_loss <= 0.10
+
+
+def test_product_valves_control_split_without_changing_total_recovery():
+    next_state = ProcessState().step(
+        {
+            "feed_pump": True,
+            "feed_valve": 100.0,
+            "distillate_valve": 25.0,
+            "bottoms_valve": 75.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.distillate_flow + next_state.bottoms_flow == pytest.approx(19.0)
+    assert next_state.bottoms_flow == pytest.approx(next_state.distillate_flow * 3.0)
+
+
 def test_feed_supply_balances_normal_column_feed():
     state = ProcessState(feed_tank_level=80.0)
 
@@ -235,6 +293,83 @@ def test_feed_supply_balances_normal_column_feed():
     assert next_state.feed_flow == 10.0
     assert next_state.feed_tank_level == 80.0
     assert next_state.to_tags()["DT101.PV.FEED_INLET_FLOW"] == 10.0
+
+
+def test_simultaneous_supply_and_open_v100_drain_ten_liters_per_second_net():
+    state = ProcessState(feed_tank_level=80.0)
+
+    next_state = state.step(
+        {
+            "feed_supply_pump": True,
+            "feed_supply_valve": True,
+            "feed_pump": True,
+            "feed_valve": 100.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 10.0
+    assert next_state.feed_flow == 20.0
+    assert next_state.feed_tank_level == pytest.approx(79.0)
+
+
+def test_closed_supply_and_v100_keep_feed_tank_stable():
+    state = ProcessState(feed_tank_level=80.0)
+
+    next_state = state.step(
+        {
+            "feed_supply_pump": False,
+            "feed_supply_valve": False,
+            "feed_pump": False,
+            "feed_valve": 0.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 0.0
+    assert next_state.feed_flow == 0.0
+    assert next_state.feed_tank_level == state.feed_tank_level
+
+
+def test_open_v100_cannot_feed_column_from_empty_tank():
+    next_state = ProcessState(feed_tank_level=0.0).step(
+        {"feed_pump": True, "feed_valve": 100.0},
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_flow == 0.0
+    assert next_state.feed_tank_level == 0.0
+
+
+def test_open_v100_passes_simultaneous_supply_through_an_empty_feed_tank():
+    next_state = ProcessState(feed_tank_level=0.0).step(
+        {
+            "feed_supply_pump": True,
+            "feed_supply_valve": True,
+            "feed_pump": True,
+            "feed_valve": 100.0,
+        },
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_inlet_flow == 10.0
+    assert next_state.feed_flow == 10.0
+    assert next_state.feed_tank_level == 0.0
+
+
+def test_v100_flow_is_limited_to_available_feed_inventory():
+    next_state = ProcessState(feed_tank_level=0.5).step(
+        {"feed_pump": True, "feed_valve": 100.0},
+        {},
+        1.0,
+    )
+
+    assert next_state.feed_flow == 5.0
+    assert next_state.feed_tank_level == 0.0
 
 
 @pytest.mark.parametrize(
@@ -274,7 +409,7 @@ def test_feed_supply_raises_level_when_column_feed_is_stopped():
     )
 
     assert next_state.feed_inlet_flow == 10.0
-    assert next_state.feed_tank_level == pytest.approx(80.15)
+    assert next_state.feed_tank_level == pytest.approx(81.0)
 
 
 def test_product_export_requires_linked_pump_and_valve():
@@ -293,7 +428,7 @@ def test_product_export_requires_linked_pump_and_valve():
         1.0,
     )
 
-    assert next_state.distillate_outlet_flow == 15.0
+    assert next_state.distillate_outlet_flow == 20.0
     assert next_state.bottoms_outlet_flow == 0.0
     assert next_state.distillate_tank_level < state.distillate_tank_level
     assert next_state.bottoms_tank_level == state.bottoms_tank_level
@@ -312,8 +447,8 @@ def test_product_export_flows_are_published_as_tags():
     )
 
     tags = state.to_tags()
-    assert tags["DT101.PV.DISTILLATE_OUTLET_FLOW"] == 15.0
-    assert tags["DT101.PV.BOTTOMS_OUTLET_FLOW"] == 15.0
+    assert tags["DT101.PV.DISTILLATE_OUTLET_FLOW"] == 20.0
+    assert tags["DT101.PV.BOTTOMS_OUTLET_FLOW"] == 20.0
 
 
 def test_condenser_opening_reduces_pressure_trend():

@@ -3,4 +3,5 @@ pandas
 plotly
 pydantic
 httpx
+paho-mqtt
 pytest

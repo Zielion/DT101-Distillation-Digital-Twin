@@ -32,3 +32,55 @@ def test_ai_fallback_returns_structured_recommendation_without_api_key():
     assert "Fault summary:" in response
     assert "Evidence:" in response
     assert "Safety caution:" in response
+
+
+def test_ai_fallback_explains_automatic_process_alarm_needs_no_intervention():
+    assistant = AIAssistant(api_key=None)
+
+    response = assistant.recommend(
+        alarm_context={
+            "active_alarms": ["DT101.ALARM.FEED_TANK_HIGH_HIGH"],
+            "mode": "NORMAL_OPERATION",
+        },
+        recent_history=[],
+    )
+
+    assert "Feed tank" in response
+    assert "automatic" in response
+    assert "No operator intervention is necessary" in response
+    assert "resolve itself" in response
+
+
+def test_ai_fallback_gives_manual_recovery_steps_for_capacity_alarm_that_locks_equipment():
+    assistant = AIAssistant(api_key=None)
+
+    response = assistant.recommend(
+        alarm_context={
+            "active_alarms": ["DT101.ALARM.FEED_TANK_OVERFILL"],
+            "mode": "NORMAL_OPERATION",
+        },
+        recent_history=[],
+    )
+
+    assert "90%" in response
+    assert "manually open V-100" in response
+    assert "distillate product" in response
+    assert "bottom product" in response
+    assert "resume automatic operation" in response
+
+
+def test_ai_fallback_treats_high_high_pressure_as_interlock_protected_alarm():
+    assistant = AIAssistant(api_key=None)
+
+    response = assistant.recommend(
+        alarm_context={
+            "active_alarms": ["DT101.ALARM.HIGH_HIGH_PRESSURE"],
+            "mode": "SHUTDOWN",
+        },
+        recent_history=[],
+    )
+
+    assert "pressure" in response
+    assert "Do not bypass the pressure interlock" in response
+    assert "condenser cooling" in response
+    assert "normal automatic sequence" in response

@@ -4,7 +4,10 @@ from dataclasses import dataclass, fields, replace
 from math import exp
 
 from .config import (
+    BOTTOMS_TANK_MAX_CAPACITY_L,
     BOTTOM_TEMP_SETPOINT,
+    DISTILLATE_TANK_MAX_CAPACITY_L,
+    FEED_TANK_MAX_CAPACITY_L,
     FEED_SUPPLY_FLOW_LPM,
     PRODUCT_EXPORT_FLOW_LPM,
     TOP_TEMP_SETPOINT,
@@ -103,10 +106,21 @@ class ProcessState:
 
         feed_comp = float(faults.get("feed_composition_light", self.feed_composition_light))
         feed_inlet_flow = FEED_SUPPLY_FLOW_LPM if feed_supply_pump and feed_supply_valve else 0.0
-        feed_flow = (feed_valve / 50.0) * 10.0 if feed_pump and self.feed_tank_level > 0 else 0.0
+        requested_feed_flow = (feed_valve / 50.0) * 10.0 if feed_pump else 0.0
+        feed_inventory_liters = self.feed_tank_level / 100.0 * FEED_TANK_MAX_CAPACITY_L
+        available_feed_flow = (
+            feed_inlet_flow + feed_inventory_liters / dt
+            if dt > 0.0
+            else requested_feed_flow
+        )
+        feed_flow = min(requested_feed_flow, available_feed_flow)
         reflux_flow = (reflux_valve / 50.0) * 5.5
-        distillate_flow = (distillate_valve / 50.0) * 4.5 if feed_flow > 0.0 else 0.0
-        bottoms_flow = (bottoms_valve / 50.0) * 4.5 if feed_flow > 0.0 else 0.0
+        distillate_weight = max(0.0, distillate_valve)
+        bottoms_weight = max(0.0, bottoms_valve)
+        product_weight = distillate_weight + bottoms_weight
+        recovered_feed_flow = feed_flow * 0.95 if product_weight > 0.0 else 0.0
+        distillate_flow = recovered_feed_flow * distillate_weight / product_weight if product_weight > 0.0 else 0.0
+        bottoms_flow = recovered_feed_flow * bottoms_weight / product_weight if product_weight > 0.0 else 0.0
         distillate_outlet_flow = (
             PRODUCT_EXPORT_FLOW_LPM
             if distillate_export_pump and distillate_export_valve and self.distillate_tank_level > 0.0
@@ -121,7 +135,8 @@ class ProcessState:
         liquid_downflow = clamp(feed_flow * 0.45 + reflux_flow * 0.30, 0.0, 10.0)
 
         feed_tank_level = clamp(
-            self.feed_tank_level + (feed_inlet_flow - feed_flow) * dt * 0.015,
+            self.feed_tank_level
+            + (feed_inlet_flow - feed_flow) * dt / FEED_TANK_MAX_CAPACITY_L * 100.0,
             0.0,
             100.0,
         )
@@ -136,12 +151,20 @@ class ProcessState:
             100.0,
         )
         distillate_tank_level = clamp(
-            self.distillate_tank_level + (distillate_flow - distillate_outlet_flow) * dt * 0.025,
+            self.distillate_tank_level
+            + (distillate_flow - distillate_outlet_flow)
+            * dt
+            / DISTILLATE_TANK_MAX_CAPACITY_L
+            * 100.0,
             0.0,
             100.0,
         )
         bottoms_tank_level = clamp(
-            self.bottoms_tank_level + (bottoms_flow - bottoms_outlet_flow) * dt * 0.025,
+            self.bottoms_tank_level
+            + (bottoms_flow - bottoms_outlet_flow)
+            * dt
+            / BOTTOMS_TANK_MAX_CAPACITY_L
+            * 100.0,
             0.0,
             100.0,
         )

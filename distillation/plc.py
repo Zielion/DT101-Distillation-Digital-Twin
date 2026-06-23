@@ -13,13 +13,49 @@ from .config import (
     PRODUCT_EXPORT_START_LEVEL,
     PRODUCT_EXPORT_STOP_LEVEL,
     REFLUX_DRUM_HIGH_HIGH,
+    TANK_CAPACITY_TRIP_LEVEL,
     REFLUX_DRUM_LEVEL_SETPOINT,
     TOP_TEMP_SETPOINT,
 )
 from .process import clamp
 
 
-PLC_CONTROL_REVISION = 3
+PLC_CONTROL_REVISION = 5
+
+AUTO = "AUTO"
+FORCE_ON = "FORCE_ON"
+FORCE_OFF = "FORCE_OFF"
+
+DEVICE_OVERRIDE_COMMANDS: dict[str, tuple[str, bool | float, bool | float]] = {
+    "DT101.HMI.P100_OVERRIDE": ("feed_supply_pump", True, False),
+    "DT101.HMI.V099_OVERRIDE": ("feed_supply_valve", True, False),
+    "DT101.HMI.V100_OVERRIDE": ("feed_valve", 100.0, 0.0),
+    "DT101.HMI.P201_OVERRIDE": ("distillate_export_pump", True, False),
+    "DT101.HMI.V201_OVERRIDE": ("distillate_export_valve", True, False),
+    "DT101.HMI.P202_OVERRIDE": ("bottoms_export_pump", True, False),
+    "DT101.HMI.V202_OVERRIDE": ("bottoms_export_valve", True, False),
+}
+
+CAPACITY_ALARM_FIELDS: dict[str, str] = {
+    "DT101.PV.FEED_TANK_LEVEL": "DT101.ALARM.FEED_TANK_OVERFILL",
+    "DT101.PV.DISTILLATE_TANK_LEVEL": "DT101.ALARM.DISTILLATE_TANK_OVERFILL",
+    "DT101.PV.BOTTOMS_TANK_LEVEL": "DT101.ALARM.BOTTOMS_TANK_OVERFILL",
+}
+CAPACITY_ALARM_TAGS = frozenset(CAPACITY_ALARM_FIELDS.values())
+PRODUCT_CAPACITY_ALARM_TAGS = frozenset(
+    {
+        "DT101.ALARM.DISTILLATE_TANK_OVERFILL",
+        "DT101.ALARM.BOTTOMS_TANK_OVERFILL",
+    }
+)
+
+
+def capacity_alarm_tags(snapshot: dict[str, float | str | bool]) -> list[str]:
+    return [
+        alarm
+        for level_tag, alarm in CAPACITY_ALARM_FIELDS.items()
+        if float(snapshot.get(level_tag, 0.0)) >= TANK_CAPACITY_TRIP_LEVEL
+    ]
 
 FILLING_FEED_TANK = "FILLING_FEED_TANK"
 FEEDING_COLUMN = "FEEDING_COLUMN"
@@ -150,7 +186,7 @@ class PLCController:
             commands["esd_shutdown"] = True
             self.mode = "SHUTDOWN"
 
-        if feed_tank_level < FEED_TANK_LOW_LOW:
+        if feed_tank_level <= FEED_TANK_LOW_LOW:
             alarms.append("DT101.ALARM.FEED_TANK_LOW_LOW")
             commands["feed_pump"] = False
             commands["feed_valve"] = 0.0
@@ -166,12 +202,67 @@ class PLCController:
         if was_idle or self.mode == "IDLE":
             commands.update({"feed_pump": False, "feed_valve": 0.0, "reboiler_duty": 0.0})
 
+        self._apply_manual_overrides(commands, snapshot)
+
+        # A manual V-100 request may bypass sequencing and the low-low cutoff,
+        # but the emergency pressure trip remains authoritative.
+        if pressure > PRESSURE_HIGH_HIGH:
+            commands["feed_pump"] = False
+            commands["feed_valve"] = 0.0
+
+        capacity_alarms = capacity_alarm_tags(snapshot)
+        alarms.extend(capacity_alarms)
+        self._apply_capacity_trip(commands, snapshot, capacity_alarms)
+
         # With no column feed there is no vapor load in this simplified model.
         # High-high pressure remains authoritative and keeps maximum cooling.
         if float(commands["feed_valve"]) <= 0.0 and pressure <= PRESSURE_HIGH_HIGH:
             commands["condenser_valve"] = 0.0
 
         return ControlOutput(commands=commands, alarms=alarms, mode=self.mode)
+
+    @staticmethod
+    def _apply_capacity_trip(
+        commands: dict[str, float | bool],
+        snapshot: dict[str, float | str | bool],
+        capacity_alarms: list[str],
+    ) -> None:
+        commands["capacity_trip_active"] = bool(capacity_alarms)
+        if not capacity_alarms:
+            return
+
+        commands["feed_supply_pump"] = False
+        commands["feed_supply_valve"] = False
+
+        product_trip_active = bool(PRODUCT_CAPACITY_ALARM_TAGS.intersection(capacity_alarms))
+        v100_forced_on = str(snapshot.get("DT101.HMI.V100_OVERRIDE", AUTO)).upper() == FORCE_ON
+        if product_trip_active or not v100_forced_on:
+            commands["feed_pump"] = False
+            commands["feed_valve"] = 0.0
+
+        for tag, command in (
+            ("DT101.HMI.P201_OVERRIDE", "distillate_export_pump"),
+            ("DT101.HMI.V201_OVERRIDE", "distillate_export_valve"),
+            ("DT101.HMI.P202_OVERRIDE", "bottoms_export_pump"),
+            ("DT101.HMI.V202_OVERRIDE", "bottoms_export_valve"),
+        ):
+            if str(snapshot.get(tag, AUTO)).upper() != FORCE_ON:
+                commands[command] = False
+
+    @staticmethod
+    def _apply_manual_overrides(
+        commands: dict[str, float | bool],
+        snapshot: dict[str, float | str | bool],
+    ) -> None:
+        for tag, (command, on_value, off_value) in DEVICE_OVERRIDE_COMMANDS.items():
+            override = str(snapshot.get(tag, AUTO)).upper()
+            if override == FORCE_ON:
+                commands[command] = on_value
+            elif override == FORCE_OFF:
+                commands[command] = off_value
+
+        if str(snapshot.get("DT101.HMI.V100_OVERRIDE", AUTO)).upper() == FORCE_ON:
+            commands["feed_pump"] = True
 
     @staticmethod
     def _product_export_state(running: bool, level: float) -> bool:

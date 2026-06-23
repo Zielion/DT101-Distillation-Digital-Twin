@@ -24,7 +24,7 @@ The PLC drives the linked devices through separate command and feedback signals:
 - `DT101.FB.FEED_SUPPLY_PUMP_RUNNING`: Boolean actual pump feedback.
 - `DT101.FB.FEED_SUPPLY_VALVE_OPEN`: Boolean actual valve feedback.
 
-The PLC stores one mutually exclusive phase, `FILLING_FEED_TANK` or `FEEDING_COLUMN`. At `<=10%`, it closes V-100 and starts P-100/V-099 only after V-100 closed feedback is confirmed. At `>=95%`, it stops P-100/V-099 and opens V-100 only after pump-stopped and valve-closed feedback are confirmed. The previous scan's feedback creates a break-before-make interval, while operator enables and safety interlocks remain authoritative. The process publishes `DT101.PV.FEED_INLET_FLOW` as `10 L/min` only when both input feedback signals are true.
+The PLC stores one mutually exclusive phase, `FILLING_FEED_TANK` or `FEEDING_COLUMN`. At `<=10%`, it closes V-100 and starts P-100/V-099 only after V-100 closed feedback is confirmed. At `>=80%`, it stops P-100/V-099 and opens V-100 only after pump-stopped and valve-closed feedback are confirmed. The previous scan's feedback creates a break-before-make interval, while operator enables and safety interlocks remain authoritative. The process publishes `DT101.PV.FEED_INLET_FLOW` as `10 L/min` only when both input feedback signals are true.
 
 ## Tank Balance And Safety
 
@@ -42,7 +42,7 @@ Consequences:
 - Supply `0 L/min`, column feed `10 L/min`: level decreases as before.
 - The final level remains clamped to `0-100%`.
 
-At `>=95%`, the PLC raises `DT101.ALARM.FEED_TANK_HIGH_HIGH` while transitioning to the column-feeding phase. The alarm clears automatically below `95%`; the phase remains latched until the level reaches `<=10%`, allowing continuous automatic cycling without operator alarm reset.
+At `>=80%`, the PLC raises `DT101.ALARM.FEED_TANK_HIGH_HIGH` while transitioning to the column-feeding phase. The alarm clears automatically below `80%`; the phase remains latched until the level reaches `<=10%`, allowing continuous automatic cycling without operator alarm reset.
 
 ## Process Overview
 

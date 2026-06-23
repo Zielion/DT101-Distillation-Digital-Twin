@@ -142,7 +142,7 @@ Safety interlocks remain authoritative. For example, high-high pressure forces r
 
 ## Feed tank automatic cycle
 
-The Feed tank starts at `10%` and uses one latched PLC phase. At `<=10%`, the PLC closes `V-100`, waits for closed feedback, and then runs `P-100` with `V-099` open. At `>=95%`, it stops `P-100`, closes `V-099`, waits for both feedbacks, and then opens `V-100`. The phase remains latched between the thresholds, and the feedback checks provide a one-scan break-before-make interval.
+The Feed tank starts at `10%` and uses one latched PLC phase. At `<=10%`, the PLC closes `V-100`, waits for closed feedback, and then runs `P-100` with `V-099` open. At `>=80%`, it stops `P-100`, closes `V-099`, waits for both feedbacks, and then opens `V-100`. The phase remains latched between the thresholds, and the feedback checks provide a one-scan break-before-make interval.
 
 The two sidebar controls are automatic-operation enables, not direct actuator commands. Disabling an enable safely closes that side; enabling it cannot bypass the active phase, equipment-feedback permissions, or safety interlocks.
 
@@ -155,7 +155,7 @@ The valve uses separate signals:
 | Actual feedback | `DT101.FB.FEED_VALVE_OPEN` | Physical open/closed feedback used by the display |
 | Resulting flow | `DT101.PV.FEED_FLOW` | Simulated feed flow into the column |
 
-When permitted, V-100 commands `100%` and produces approximately `20 L/min`; otherwise it commands `0%`. `IDLE`, high-high pressure, and low Feed tank level remain authoritative. The `>=95%` alarm clears automatically below `95%` so it does not block the next automatic cycle.
+When permitted, V-100 commands `100%` and produces approximately `20 L/min`; otherwise it commands `0%`. `IDLE`, high-high pressure, and low Feed tank level remain authoritative. The `>=80%` alarm clears automatically below `80%` so it does not block the next automatic cycle.
 
 ## Main temperature tags
 
@@ -191,7 +191,7 @@ Each fault is designed to produce detectable evidence within 60 simulated second
 3. Change the top and bottom temperatures. Point out that Layers 7 and 1 change immediately.
 4. Run multiple ticks and show Layers 2-6 approaching their new linear targets gradually in the process figure and layer-temperature chart.
 5. Advance from the reset `10%` level and show P-100/V-099 filling while V-100 remains closed.
-6. Set or advance the level to `95%`; show the input devices stop for one feedback-confirmation scan before V-100 opens. Repeat at `10%` for the reverse transition.
+6. Set or advance the level to `80%`; show the input devices stop for one feedback-confirmation scan before V-100 opens. Repeat at `10%` for the reverse transition.
 7. Inject top temperature sensor drift and show the inconsistency with pressure, reflux, and purity evidence.
 8. Inject the reflux-valve-stuck fault and show the command-feedback mismatch and separation-quality degradation.
 9. Inject a feed-composition disturbance and observe the temperature profile, controller outputs, and purity proxy.
