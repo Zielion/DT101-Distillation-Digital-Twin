@@ -1,0 +1,45 @@
+{
+  "title": "DT101 Cloud Trends Import Test",
+  "image": null,
+  "mobileHide": false,
+  "mobileOrder": null,
+  "configuration": {
+    "description": "Minimal ThingsBoard dashboard import test for DT101. If this imports, add widgets from the dashboard editor.",
+    "settings": {},
+    "timewindow": {
+      "realtime": {
+        "timewindowMs": 600000
+      },
+      "aggregation": {
+        "type": "NONE",
+        "limit": 25000
+      }
+    },
+    "entityAliases": {
+      "0e1e2b0d-32e2-4ed8-9237-0f48c4e663b6": {
+        "id": "0e1e2b0d-32e2-4ed8-9237-0f48c4e663b6",
+        "alias": "DT101",
+        "filter": {
+          "type": "singleEntity",
+          "singleEntity": {
+            "entityType": "DEVICE",
+            "id": "32d6ffd0-6eab-11f1-8797-0936777895d2"
+          },
+          "resolveMultiple": false
+        }
+      }
+    },
+    "widgets": {},
+    "states": {
+      "default": {
+        "name": "Default",
+        "root": true,
+        "layouts": {
+          "main": {
+            "widgets": {}
+          }
+        }
+      }
+    }
+  }
+}

@@ -26,13 +26,16 @@ TAG_DICTIONARY: dict[str, TagMeta] = {
     "DT101.CMD.FEED_SUPPLY_VALVE": TagMeta("DT101.CMD.FEED_SUPPLY_VALVE", "V-099 inlet valve open command", "bool", "True/False", "", "PLC"),
     "DT101.FB.FEED_SUPPLY_PUMP_RUNNING": TagMeta("DT101.FB.FEED_SUPPLY_PUMP_RUNNING", "P-100 pump running feedback", "bool", "True/False", "", "PLC"),
     "DT101.FB.FEED_SUPPLY_VALVE_OPEN": TagMeta("DT101.FB.FEED_SUPPLY_VALVE_OPEN", "V-099 inlet valve open feedback", "bool", "True/False", "", "PLC"),
-    "DT101.ALARM.FEED_TANK_HIGH_HIGH": TagMeta("DT101.ALARM.FEED_TANK_HIGH_HIGH", "Feed tank high-high level alarm", "bool", "False", "Active at >= 95%; clears below 95%", "PLC"),
-    "DT101.PV.DISTILLATE_OUTLET_FLOW": TagMeta("DT101.PV.DISTILLATE_OUTLET_FLOW", "Distillate product export flow", "L/min", "0 or 15", "", "simulator"),
+    "DT101.ALARM.FEED_TANK_HIGH_HIGH": TagMeta("DT101.ALARM.FEED_TANK_HIGH_HIGH", "Feed tank high-high level alarm", "bool", "False", "Active at >= 80%; clears below 80%", "PLC"),
+    "DT101.ALARM.FEED_TANK_OVERFILL": TagMeta("DT101.ALARM.FEED_TANK_OVERFILL", "Feed tank 90% capacity trip", "bool", "False", "Active at >= 90%; clears below 90%", "PLC"),
+    "DT101.ALARM.DISTILLATE_TANK_OVERFILL": TagMeta("DT101.ALARM.DISTILLATE_TANK_OVERFILL", "Distillate tank 90% capacity trip", "bool", "False", "Active at >= 90%; clears below 90%", "PLC"),
+    "DT101.ALARM.BOTTOMS_TANK_OVERFILL": TagMeta("DT101.ALARM.BOTTOMS_TANK_OVERFILL", "Bottoms tank 90% capacity trip", "bool", "False", "Active at >= 90%; clears below 90%", "PLC"),
+    "DT101.PV.DISTILLATE_OUTLET_FLOW": TagMeta("DT101.PV.DISTILLATE_OUTLET_FLOW", "Distillate product export flow", "L/s", "0 or 20", "", "simulator"),
     "DT101.CMD.DISTILLATE_EXPORT_PUMP": TagMeta("DT101.CMD.DISTILLATE_EXPORT_PUMP", "Distillate export pump P-201 run command", "bool", "True/False", "", "PLC"),
     "DT101.CMD.DISTILLATE_EXPORT_VALVE": TagMeta("DT101.CMD.DISTILLATE_EXPORT_VALVE", "Distillate export valve V-201 open command", "bool", "True/False", "", "PLC"),
     "DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING": TagMeta("DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING", "Distillate export pump P-201 running feedback", "bool", "True/False", "", "PLC"),
     "DT101.FB.DISTILLATE_EXPORT_VALVE_OPEN": TagMeta("DT101.FB.DISTILLATE_EXPORT_VALVE_OPEN", "Distillate export valve V-201 open feedback", "bool", "True/False", "", "PLC"),
-    "DT101.PV.BOTTOMS_OUTLET_FLOW": TagMeta("DT101.PV.BOTTOMS_OUTLET_FLOW", "Bottom product export flow", "L/min", "0 or 15", "", "simulator"),
+    "DT101.PV.BOTTOMS_OUTLET_FLOW": TagMeta("DT101.PV.BOTTOMS_OUTLET_FLOW", "Bottom product export flow", "L/s", "0 or 20", "", "simulator"),
     "DT101.CMD.BOTTOMS_EXPORT_PUMP": TagMeta("DT101.CMD.BOTTOMS_EXPORT_PUMP", "Bottom product export pump P-202 run command", "bool", "True/False", "", "PLC"),
     "DT101.CMD.BOTTOMS_EXPORT_VALVE": TagMeta("DT101.CMD.BOTTOMS_EXPORT_VALVE", "Bottom product export valve V-202 open command", "bool", "True/False", "", "PLC"),
     "DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING": TagMeta("DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING", "Bottom product export pump P-202 running feedback", "bool", "True/False", "", "PLC"),
@@ -47,6 +50,25 @@ TAG_DICTIONARY: dict[str, TagMeta] = {
     "DT101.CMD.REFLUX_VALVE": TagMeta("DT101.CMD.REFLUX_VALVE", "Reflux valve command", "%", "0-100", "", "PLC"),
     "DT101.STATE.MODE": TagMeta("DT101.STATE.MODE", "PLC operating mode", "state", "NORMAL_OPERATION", "", "PLC"),
 }
+
+for device, description in {
+    "P100": "P-100 upstream feed pump manual override",
+    "V099": "V-099 upstream feed valve manual override",
+    "V100": "V-100 column feed valve manual override",
+    "P201": "P-201 distillate export pump manual override",
+    "V201": "V-201 distillate export valve manual override",
+    "P202": "P-202 bottoms export pump manual override",
+    "V202": "V-202 bottoms export valve manual override",
+}.items():
+    tag_name = f"DT101.HMI.{device}_OVERRIDE"
+    TAG_DICTIONARY[tag_name] = TagMeta(
+        tag_name,
+        description,
+        "state",
+        "AUTO/FORCE_ON/FORCE_OFF",
+        "",
+        "operator/HMI",
+    )
 
 for index in range(1, 8):
     layer_role = "Bottom" if index == 1 else "Top" if index == 7 else f"Middle {index - 1}"

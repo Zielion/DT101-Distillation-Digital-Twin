@@ -1,5 +1,179 @@
+import pytest
+
 from distillation.plc import PLCController
 from distillation.process import ProcessState
+from distillation.tags import TAG_DICTIONARY
+
+
+OVERRIDE_CASES = (
+    ("DT101.HMI.P100_OVERRIDE", "feed_supply_pump", True, False),
+    ("DT101.HMI.V099_OVERRIDE", "feed_supply_valve", True, False),
+    ("DT101.HMI.V100_OVERRIDE", "feed_valve", 100.0, 0.0),
+    ("DT101.HMI.P201_OVERRIDE", "distillate_export_pump", True, False),
+    ("DT101.HMI.V201_OVERRIDE", "distillate_export_valve", True, False),
+    ("DT101.HMI.P202_OVERRIDE", "bottoms_export_pump", True, False),
+    ("DT101.HMI.V202_OVERRIDE", "bottoms_export_valve", True, False),
+)
+
+
+@pytest.mark.parametrize(("tag", "command", "on_value", "off_value"), OVERRIDE_CASES)
+def test_manual_override_forces_each_device_independently(tag, command, on_value, off_value):
+    state = ProcessState(feed_tank_level=80.0, distillate_tank_level=40.0, bottoms_tank_level=40.0)
+
+    forced_on = PLCController(mode="NORMAL_OPERATION").scan(
+        {**state.to_tags(), tag: "FORCE_ON"},
+        1.0,
+    )
+    forced_off = PLCController(mode="NORMAL_OPERATION").scan(
+        {**state.to_tags(), tag: "FORCE_OFF"},
+        1.0,
+    )
+
+    assert forced_on.commands[command] == on_value
+    assert forced_off.commands[command] == off_value
+
+
+def test_manual_v100_open_bypasses_low_level_and_runs_internal_feed_pump():
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(feed_tank_level=5.0).to_tags(),
+            "DT101.HMI.V100_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["feed_pump"] is True
+    assert output.commands["feed_valve"] == 100.0
+
+
+def test_high_high_pressure_closes_v100_even_when_forced_open():
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(column_pressure=145.0).to_tags(),
+            "DT101.HMI.V100_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["feed_pump"] is False
+    assert output.commands["feed_valve"] == 0.0
+
+
+def test_product_auto_hysteresis_continues_while_device_is_overridden():
+    controller = PLCController(mode="NORMAL_OPERATION")
+    controller.scan(ProcessState(distillate_tank_level=61.0).to_tags(), 1.0)
+
+    manual = controller.scan(
+        {
+            **ProcessState(distillate_tank_level=40.0).to_tags(),
+            "DT101.HMI.P201_OVERRIDE": "FORCE_OFF",
+        },
+        1.0,
+    )
+    automatic = controller.scan(
+        {
+            **ProcessState(distillate_tank_level=40.0).to_tags(),
+            "DT101.HMI.P201_OVERRIDE": "AUTO",
+        },
+        1.0,
+    )
+
+    assert manual.commands["distillate_export_pump"] is False
+    assert automatic.commands["distillate_export_pump"] is True
+
+
+def test_override_tags_are_declared_as_three_state_operator_inputs():
+    for tag, _, _, _ in OVERRIDE_CASES:
+        meta = TAG_DICTIONARY[tag]
+        assert meta.unit == "state"
+        assert meta.normal_range == "AUTO/FORCE_ON/FORCE_OFF"
+        assert meta.source == "operator/HMI"
+
+
+CAPACITY_ALARM_CASES = (
+    ("feed_tank_level", "DT101.ALARM.FEED_TANK_OVERFILL"),
+    ("distillate_tank_level", "DT101.ALARM.DISTILLATE_TANK_OVERFILL"),
+    ("bottoms_tank_level", "DT101.ALARM.BOTTOMS_TANK_OVERFILL"),
+)
+
+
+@pytest.mark.parametrize(("level_field", "alarm_tag"), CAPACITY_ALARM_CASES)
+def test_capacity_alarm_triggers_at_or_above_ninety_percent(level_field, alarm_tag):
+    controller = PLCController(mode="NORMAL_OPERATION")
+
+    below = controller.scan(ProcessState(**{level_field: 89.99}).to_tags(), 1.0)
+    at_limit = controller.scan(ProcessState(**{level_field: 90.0}).to_tags(), 1.0)
+
+    assert alarm_tag not in below.alarms
+    assert alarm_tag in at_limit.alarms
+    assert at_limit.commands["capacity_trip_active"] is True
+
+
+def test_feed_only_capacity_trip_locks_supply_but_allows_manual_v100_drainage():
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(feed_tank_level=90.0).to_tags(),
+            "DT101.HMI.P100_OVERRIDE": "FORCE_ON",
+            "DT101.HMI.V099_OVERRIDE": "FORCE_ON",
+            "DT101.HMI.V100_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["feed_supply_pump"] is False
+    assert output.commands["feed_supply_valve"] is False
+    assert output.commands["feed_pump"] is True
+    assert output.commands["feed_valve"] == 100.0
+
+
+@pytest.mark.parametrize("level_field", ("distillate_tank_level", "bottoms_tank_level"))
+def test_product_capacity_trip_locks_v100_even_when_forced_open(level_field):
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(**{level_field: 90.0}).to_tags(),
+            "DT101.HMI.V100_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["feed_pump"] is False
+    assert output.commands["feed_valve"] == 0.0
+
+
+def test_combined_feed_and_product_capacity_trip_uses_stricter_v100_lock():
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(feed_tank_level=90.0, distillate_tank_level=90.0).to_tags(),
+            "DT101.HMI.V100_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["feed_pump"] is False
+    assert output.commands["feed_valve"] == 0.0
+
+
+def test_product_capacity_trip_allows_explicit_manual_export_for_drainage():
+    output = PLCController(mode="NORMAL_OPERATION").scan(
+        {
+            **ProcessState(distillate_tank_level=90.0).to_tags(),
+            "DT101.HMI.P201_OVERRIDE": "FORCE_ON",
+            "DT101.HMI.V201_OVERRIDE": "FORCE_ON",
+        },
+        1.0,
+    )
+
+    assert output.commands["distillate_export_pump"] is True
+    assert output.commands["distillate_export_valve"] is True
+    assert output.commands["bottoms_export_pump"] is False
+    assert output.commands["bottoms_export_valve"] is False
+
+
+def test_capacity_alarm_tags_use_the_shared_ninety_percent_limit():
+    for _, tag in CAPACITY_ALARM_CASES:
+        meta = TAG_DICTIONARY[tag]
+        assert meta.unit == "bool"
+        assert meta.alarm_limits == "Active at >= 90%; clears below 90%"
 
 
 def test_high_high_pressure_forces_shutdown_actions():
@@ -22,6 +196,17 @@ def test_low_feed_tank_level_stops_feed_pump():
     output = controller.scan(state.to_tags(), 1.0)
 
     assert output.commands["feed_pump"] is False
+    assert "DT101.ALARM.FEED_TANK_LOW_LOW" in output.alarms
+
+
+def test_feed_tank_low_low_alarm_includes_threshold_value():
+    controller = PLCController(mode="NORMAL_OPERATION")
+    state = ProcessState(feed_tank_level=10.0)
+
+    output = controller.scan(state.to_tags(), 1.0)
+
+    assert output.commands["feed_pump"] is False
+    assert output.commands["feed_valve"] == 0.0
     assert "DT101.ALARM.FEED_TANK_LOW_LOW" in output.alarms
 
 
@@ -158,7 +343,7 @@ def test_low_level_fill_phase_waits_for_v100_closed_feedback_before_starting_sup
     assert running.commands["feed_valve"] == 0.0
 
 
-def test_fill_phase_latches_between_ten_and_ninety_five_percent():
+def test_fill_phase_latches_between_ten_and_eighty_percent():
     controller = PLCController(mode="NORMAL_OPERATION")
     controller.scan(
         automatic_feed_snapshot(10.0, **{"DT101.FB.FEED_VALVE_OPEN": False}),
@@ -166,7 +351,7 @@ def test_fill_phase_latches_between_ten_and_ninety_five_percent():
     )
 
     output = controller.scan(
-        automatic_feed_snapshot(80.0, **{"DT101.FB.FEED_VALVE_OPEN": False}),
+        automatic_feed_snapshot(79.9, **{"DT101.FB.FEED_VALVE_OPEN": False}),
         1.0,
     )
 
@@ -185,7 +370,7 @@ def test_high_level_feed_phase_waits_for_supply_stopped_feedback_before_opening_
 
     waiting = controller.scan(
         automatic_feed_snapshot(
-            95.0,
+            80.0,
             **{
                 "DT101.FB.FEED_SUPPLY_PUMP_RUNNING": True,
                 "DT101.FB.FEED_SUPPLY_VALVE_OPEN": True,
@@ -195,7 +380,7 @@ def test_high_level_feed_phase_waits_for_supply_stopped_feedback_before_opening_
     )
     feeding = controller.scan(
         automatic_feed_snapshot(
-            95.0,
+            80.0,
             **{
                 "DT101.FB.FEED_SUPPLY_PUMP_RUNNING": False,
                 "DT101.FB.FEED_SUPPLY_VALVE_OPEN": False,
@@ -213,7 +398,7 @@ def test_high_level_feed_phase_waits_for_supply_stopped_feedback_before_opening_
     assert feeding.commands["feed_valve"] == 100.0
 
 
-def test_feed_phase_latches_below_ninety_five_until_level_reaches_ten():
+def test_feed_phase_latches_below_eighty_until_level_reaches_ten():
     controller = PLCController(mode="NORMAL_OPERATION", feed_cycle_phase="FEEDING_COLUMN")
 
     feeding = controller.scan(
@@ -267,11 +452,11 @@ def test_manual_allows_cannot_bypass_phase_or_feedback_interlocks():
     assert disabled_v100.commands["feed_valve"] == 0.0
 
 
-def test_high_level_alarm_clears_automatically_below_ninety_five_percent():
+def test_high_level_alarm_clears_automatically_below_eighty_percent():
     controller = PLCController(mode="NORMAL_OPERATION")
 
-    high = controller.scan(automatic_feed_snapshot(95.0), 1.0)
-    cleared = controller.scan(automatic_feed_snapshot(94.9), 1.0)
+    high = controller.scan(automatic_feed_snapshot(80.0), 1.0)
+    cleared = controller.scan(automatic_feed_snapshot(79.9), 1.0)
 
     assert "DT101.ALARM.FEED_TANK_HIGH_HIGH" in high.alarms
     assert "DT101.ALARM.FEED_TANK_HIGH_HIGH" not in cleared.alarms

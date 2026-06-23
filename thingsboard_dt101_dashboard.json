@@ -1,0 +1,347 @@
+{
+  "title": "DT101 Cloud Trends",
+  "image": null,
+  "mobileHide": false,
+  "mobileOrder": null,
+  "configuration": {
+    "description": "DT101 distillation cloud dashboard generated for ThingsBoard telemetry uploaded by MQTT.",
+    "timewindow": {
+      "displayValue": "",
+      "hideInterval": false,
+      "hideLastInterval": false,
+      "hideQuickInterval": false,
+      "hideAggregation": false,
+      "hideAggInterval": false,
+      "hideTimezone": false,
+      "selectedTab": 0,
+      "realtime": {
+        "timewindowMs": 600000
+      },
+      "aggregation": {
+        "type": "NONE",
+        "limit": 25000
+      }
+    },
+    "settings": {},
+    "entityAliases": {
+      "dt101-device-alias": {
+        "id": "dt101-device-alias",
+        "alias": "DT101",
+        "filter": {
+          "type": "singleEntity",
+          "singleEntity": {
+            "entityType": "DEVICE",
+            "id": "32d6ffd0-6eab-11f1-8797-0936777895d2"
+          },
+          "resolveMultiple": false
+        }
+      }
+    },
+    "widgets": {
+      "dt101-core-process-widget": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "typeFullFqn": "system.charts.basic_timeseries",
+        "type": "timeseries",
+        "title": "Historian trends - core process",
+        "sizeX": 12,
+        "sizeY": 8,
+        "row": 0,
+        "col": 0,
+        "config": {
+          "title": "Historian trends - core process",
+          "showTitle": true,
+          "datasources": [
+            {
+              "type": "entity",
+              "name": "DT101",
+              "entityAliasId": "dt101-device-alias",
+              "dataKeys": [
+                {
+                  "name": "DT101.PV.TOP_TEMP",
+                  "type": "timeseries",
+                  "label": "Top temp",
+                  "color": "#1f77b4"
+                },
+                {
+                  "name": "DT101.PV.BOTTOM_TEMP",
+                  "type": "timeseries",
+                  "label": "Bottom temp",
+                  "color": "#ff7f0e"
+                },
+                {
+                  "name": "DT101.CMD.FEED_VALVE",
+                  "type": "timeseries",
+                  "label": "Feed valve command",
+                  "color": "#2ca02c"
+                },
+                {
+                  "name": "DT101.PV.COLUMN_PRESSURE",
+                  "type": "timeseries",
+                  "label": "Column pressure",
+                  "color": "#d62728"
+                },
+                {
+                  "name": "DT101.PV.PURITY_PROXY",
+                  "type": "timeseries",
+                  "label": "Purity proxy",
+                  "color": "#9467bd"
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "realtime": {
+              "timewindowMs": 600000
+            },
+            "aggregation": {
+              "type": "NONE",
+              "limit": 25000
+            }
+          }
+        }
+      },
+      "dt101-equipment-state-widget": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "typeFullFqn": "system.charts.basic_timeseries",
+        "type": "timeseries",
+        "title": "Equipment state historian trends",
+        "sizeX": 12,
+        "sizeY": 8,
+        "row": 0,
+        "col": 12,
+        "config": {
+          "title": "Equipment state historian trends",
+          "showTitle": true,
+          "datasources": [
+            {
+              "type": "entity",
+              "name": "DT101",
+              "entityAliasId": "dt101-device-alias",
+              "dataKeys": [
+                {
+                  "name": "DT101.FB.FEED_SUPPLY_PUMP_RUNNING",
+                  "type": "timeseries",
+                  "label": "P-100 running",
+                  "color": "#1f77b4"
+                },
+                {
+                  "name": "DT101.FB.FEED_SUPPLY_VALVE_OPEN",
+                  "type": "timeseries",
+                  "label": "V-099 open",
+                  "color": "#ff7f0e"
+                },
+                {
+                  "name": "DT101.FB.FEED_VALVE_OPEN",
+                  "type": "timeseries",
+                  "label": "V-100 open",
+                  "color": "#2ca02c"
+                },
+                {
+                  "name": "DT101.FB.DISTILLATE_EXPORT_PUMP_RUNNING",
+                  "type": "timeseries",
+                  "label": "P-201 running",
+                  "color": "#d62728"
+                },
+                {
+                  "name": "DT101.FB.DISTILLATE_EXPORT_VALVE_OPEN",
+                  "type": "timeseries",
+                  "label": "V-201 open",
+                  "color": "#9467bd"
+                },
+                {
+                  "name": "DT101.FB.BOTTOMS_EXPORT_PUMP_RUNNING",
+                  "type": "timeseries",
+                  "label": "P-202 running",
+                  "color": "#8c564b"
+                },
+                {
+                  "name": "DT101.FB.BOTTOMS_EXPORT_VALVE_OPEN",
+                  "type": "timeseries",
+                  "label": "V-202 open",
+                  "color": "#e377c2"
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "realtime": {
+              "timewindowMs": 600000
+            },
+            "aggregation": {
+              "type": "NONE",
+              "limit": 25000
+            }
+          }
+        }
+      },
+      "dt101-tank-level-widget": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "typeFullFqn": "system.charts.basic_timeseries",
+        "type": "timeseries",
+        "title": "Tank level historian trends",
+        "sizeX": 12,
+        "sizeY": 8,
+        "row": 8,
+        "col": 0,
+        "config": {
+          "title": "Tank level historian trends",
+          "showTitle": true,
+          "datasources": [
+            {
+              "type": "entity",
+              "name": "DT101",
+              "entityAliasId": "dt101-device-alias",
+              "dataKeys": [
+                {
+                  "name": "DT101.PV.FEED_TANK_LEVEL",
+                  "type": "timeseries",
+                  "label": "Feed tank level (% vol)",
+                  "color": "#1f77b4"
+                },
+                {
+                  "name": "DT101.PV.DISTILLATE_TANK_LEVEL",
+                  "type": "timeseries",
+                  "label": "Distillate tank level (% vol)",
+                  "color": "#ff7f0e"
+                },
+                {
+                  "name": "DT101.PV.BOTTOMS_TANK_LEVEL",
+                  "type": "timeseries",
+                  "label": "Bottoms tank level (% vol)",
+                  "color": "#2ca02c"
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "realtime": {
+              "timewindowMs": 600000
+            },
+            "aggregation": {
+              "type": "NONE",
+              "limit": 25000
+            }
+          }
+        }
+      },
+      "dt101-layer-temperature-widget": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "typeFullFqn": "system.charts.basic_timeseries",
+        "type": "timeseries",
+        "title": "Layer temperature historian trends",
+        "sizeX": 12,
+        "sizeY": 8,
+        "row": 8,
+        "col": 12,
+        "config": {
+          "title": "Layer temperature historian trends",
+          "showTitle": true,
+          "datasources": [
+            {
+              "type": "entity",
+              "name": "DT101",
+              "entityAliasId": "dt101-device-alias",
+              "dataKeys": [
+                {
+                  "name": "DT101.PV.LAYER_07_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 7 - Top",
+                  "color": "#22d3ee"
+                },
+                {
+                  "name": "DT101.PV.LAYER_06_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 6",
+                  "color": "#3b82f6"
+                },
+                {
+                  "name": "DT101.PV.LAYER_05_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 5",
+                  "color": "#14b8a6"
+                },
+                {
+                  "name": "DT101.PV.LAYER_04_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 4",
+                  "color": "#facc15"
+                },
+                {
+                  "name": "DT101.PV.LAYER_03_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 3",
+                  "color": "#fb923c"
+                },
+                {
+                  "name": "DT101.PV.LAYER_02_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 2",
+                  "color": "#f87171"
+                },
+                {
+                  "name": "DT101.PV.LAYER_01_TEMP",
+                  "type": "timeseries",
+                  "label": "Layer 1 - Bottom",
+                  "color": "#dc2626"
+                }
+              ]
+            }
+          ],
+          "timewindow": {
+            "realtime": {
+              "timewindowMs": 600000
+            },
+            "aggregation": {
+              "type": "NONE",
+              "limit": 25000
+            }
+          }
+        }
+      }
+    },
+    "states": {
+      "default": {
+        "name": "DT101",
+        "root": true,
+        "layouts": {
+          "main": {
+            "widgets": {
+              "dt101-core-process-widget": {
+                "sizeX": 12,
+                "sizeY": 8,
+                "row": 0,
+                "col": 0
+              },
+              "dt101-equipment-state-widget": {
+                "sizeX": 12,
+                "sizeY": 8,
+                "row": 0,
+                "col": 12
+              },
+              "dt101-tank-level-widget": {
+                "sizeX": 12,
+                "sizeY": 8,
+                "row": 8,
+                "col": 0
+              },
+              "dt101-layer-temperature-widget": {
+                "sizeX": 12,
+                "sizeY": 8,
+                "row": 8,
+                "col": 12
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -8,3 +8,4 @@ distillation_history.sqlite
 .env
 *.log
 .pytest_tmp_*/
+pytest_tmp*/
