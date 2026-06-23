@@ -13,8 +13,11 @@ The implementation follows the assignment concept described in `Distillation_Pro
 - Five persistent middle-layer temperatures with a 20-second first-order response for heating and cooling.
 - PLC scan cycle, operating state machine, PID-like loops, alarms, and safety interlocks.
 - Automatic Feed tank fill/feed cycling with feedback-confirmed interlocks between `P-100`/`V-099` and `V-100`.
+- Per-device manual overrides for feed supply, column feed, and product export equipment.
+- 90% tank capacity trips with guided manual recovery paths for feed, distillate, and bottoms tanks.
 - Four injectable faults covering sensor, equipment, process, and infrastructure layers.
-- SQLite historian with tick-based general trends and a dedicated seven-layer temperature chart.
+- SQLite historian with tick-based process, equipment-state, tank-level, and seven-layer temperature charts.
+- Optional ThingsBoard Cloud telemetry upload over HTTP or MQTT, with dashboard JSON artifacts.
 - DeepSeek operator recommendations with a deterministic fallback when the API is unavailable.
 
 ## Run
@@ -48,6 +51,33 @@ The default API base URL is `https://api.deepseek.com`. Never commit a real API 
 
 If `DEEPSEEK_API_KEY` is missing or the API request fails, the assistant returns a deterministic structured recommendation so the demonstration can continue offline.
 
+### ThingsBoard configuration
+
+Set a ThingsBoard device access token to enable cloud telemetry upload from the sidebar:
+
+```powershell
+$env:THINGSBOARD_ACCESS_TOKEN="your_device_token"
+```
+
+The default transport is HTTP to `https://thingsboard.cloud`. To use MQTT instead:
+
+```powershell
+$env:THINGSBOARD_TRANSPORT="mqtt"
+$env:THINGSBOARD_MQTT_HOST="mqtt.thingsboard.cloud"
+```
+
+Optional HTTP host override:
+
+```powershell
+$env:THINGSBOARD_HOST="https://thingsboard.cloud"
+```
+
+The same keys can be stored locally in `.streamlit/secrets.toml`. Do not commit real tokens. The repository includes ThingsBoard dashboard JSON files for import/testing:
+
+- `thingsboard_dt101_cloud_trends_4widgets.json`
+- `thingsboard_dt101_dashboard.json`
+- `thingsboard_dt101_dashboard_minimal_import_test.json`
+
 ## Architecture
 
 ```text
@@ -63,10 +93,13 @@ PLC scan cycle, PID-like control, state machine, and interlocks
 In-memory tag bus -> SQLite historian -> Streamlit trends
                 |
                 v
+Optional ThingsBoard HTTP/MQTT telemetry upload
+                |
+                v
 DeepSeek operator assistant or deterministic fallback
 ```
 
-The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity and industrial data storage without requiring external infrastructure. Fast control and safety decisions remain in the PLC layer; the AI assistant receives process evidence and produces recommendations but does not directly control equipment.
+The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity and industrial data storage without requiring external infrastructure. When configured, the app can also publish the visible trend groups to ThingsBoard Cloud. Fast control and safety decisions remain in the PLC layer; the AI assistant receives process evidence and produces recommendations but does not directly control equipment.
 
 ## Project structure
 
@@ -76,8 +109,11 @@ The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity an
 - `distillation/faults.py`: fault injection and alarm detection for the four assignment layers.
 - `distillation/tags.py`: tag metadata for process values, commands, feedback, states, and alarms.
 - `distillation/historian.py`: in-memory tag bus and SQLite historian with timestamp and tick storage.
-- `distillation/visualization.py`: seven-layer temperature historian chart configuration.
+- `distillation/visualization.py`: process, equipment-state, tank-level, and layer-temperature historian chart builders.
+- `distillation/cloud_bridge.py`: ThingsBoard HTTP/MQTT payload building and upload clients.
+- `distillation/alarm_display.py`: transient alarm text visibility timing.
 - `distillation/ai_assistant.py`: DeepSeek client, prompt builder, and deterministic fallback.
+- `thingsboard_dt101_*.json`: importable ThingsBoard dashboard artifacts.
 - `tests/`: focused tests for process dynamics, PLC behavior, faults, historian storage, visualization, Streamlit integration, and AI prompting.
 
 ## Simulation time and historian
@@ -90,9 +126,11 @@ The simulation begins at tick `0`. Each process tick uses a one-second time step
 
 The historian stores both a UTC timestamp and the simulation tick for each tag value. Dashboard charts use the tick as the X-axis and label it `Second`, so a point at tick `n` represents simulated second `n` rather than wall-clock time.
 
-Two historian charts are available:
+Four historian charts are available:
 
-- **Historian trends**: top and bottom temperatures, pressure, purity proxy, setpoints, and key actuator commands/feedback.
+- **Historian trends**: top and bottom temperatures, feed valve command, pressure, and purity proxy.
+- **Equipment state historian trends**: pump, valve, and feedback states normalized to `0` or `1`.
+- **Tank level historian trends**: Feed, distillate, and bottoms tank levels on a `0..100%` axis.
 - **Layer temperature historian trends**: seven independently colored traces sourced directly from `DT101.PV.LAYER_01_TEMP` through `DT101.PV.LAYER_07_TEMP`.
 
 Resetting the simulation clears the historian and creates a new equilibrium record at tick `0`. During the data-staleness fault, broker and historian writes stop intentionally while the local process model can continue advancing. The charts therefore receive no new points until communication is restored.
@@ -144,18 +182,31 @@ Safety interlocks remain authoritative. For example, high-high pressure forces r
 
 The Feed tank starts at `10%` and uses one latched PLC phase. At `<=10%`, the PLC closes `V-100`, waits for closed feedback, and then runs `P-100` with `V-099` open. At `>=80%`, it stops `P-100`, closes `V-099`, waits for both feedbacks, and then opens `V-100`. The phase remains latched between the thresholds, and the feedback checks provide a one-scan break-before-make interval.
 
-The two sidebar controls are automatic-operation enables, not direct actuator commands. Disabling an enable safely closes that side; enabling it cannot bypass the active phase, equipment-feedback permissions, or safety interlocks.
+The manual equipment controls expose independent `AUTO`, `FORCE_ON`, and `FORCE_OFF` override states for `P-100`, `V-099`, `V-100`, `P-201`, `V-201`, `P-202`, and `V-202`. Each override affects only the selected device; untouched equipment remains in automatic control. Returning a device to Auto restores the PLC sequence, feedback permissions, and safety interlocks.
 
-The valve uses separate signals:
+The V-100 valve uses separate signals:
 
 | Signal | Tag | Meaning |
 | --- | --- | --- |
 | Operator enable | `DT101.HMI.FEED_VALVE_OPEN_REQUEST` | Allows automatic V-100 opening when phase and feedback permits are satisfied |
+| Manual override | `DT101.HMI.V100_OVERRIDE` | Three-state HMI override: `AUTO`, `FORCE_ON`, or `FORCE_OFF` |
 | PLC command | `DT101.CMD.FEED_VALVE` | Commanded valve position in percent |
 | Actual feedback | `DT101.FB.FEED_VALVE_OPEN` | Physical open/closed feedback used by the display |
 | Resulting flow | `DT101.PV.FEED_FLOW` | Simulated feed flow into the column |
 
-When permitted, V-100 commands `100%` and produces approximately `20 L/min`; otherwise it commands `0%`. `IDLE`, high-high pressure, and low Feed tank level remain authoritative. The `>=80%` alarm clears automatically below `80%` so it does not block the next automatic cycle.
+When permitted, V-100 commands `100%` and the UI displays approximately `20 L/s`; otherwise it commands `0%`. `IDLE`, high-high pressure, and low Feed tank level remain authoritative. The `>=80%` alarm clears automatically below `80%` so it does not block the next automatic cycle.
+
+## Capacity trips and manual recovery
+
+All three tanks have a 90% capacity trip:
+
+| Tank | Alarm |
+| --- | --- |
+| Feed tank | `DT101.ALARM.FEED_TANK_OVERFILL` |
+| Distillate tank | `DT101.ALARM.DISTILLATE_TANK_OVERFILL` |
+| Bottoms tank | `DT101.ALARM.BOTTOMS_TANK_OVERFILL` |
+
+A Feed tank overfill locks `P-100` and `V-099` to prevent additional upstream filling, while allowing a controlled manual V-100 drainage path if product tanks are not tripped. A distillate or bottoms tank overfill locks the feed path, including V-100, while keeping the matching product drain controls available for manual recovery. High-high pressure remains the strongest interlock and closes V-100 even if it is manually forced on.
 
 ## Main temperature tags
 
@@ -196,8 +247,10 @@ Each fault is designed to produce detectable evidence within 60 simulated second
 8. Inject the reflux-valve-stuck fault and show the command-feedback mismatch and separation-quality degradation.
 9. Inject a feed-composition disturbance and observe the temperature profile, controller outputs, and purity proxy.
 10. Inject data staleness and show that historian traces stop receiving new points while the local simulation can continue.
-11. Compare the general historian chart with the dedicated seven-layer temperature chart. Both use simulated seconds on the X-axis.
-12. Ask the DeepSeek assistant for a recommendation and explain the safety boundary: AI recommends; PLC logic controls.
+11. Compare the process, equipment-state, tank-level, and seven-layer historian charts. All use simulated seconds on the X-axis.
+12. Trigger a 90% capacity trip and show how locked manual controls guide recovery.
+13. If a ThingsBoard token is configured, upload the latest trend window or let automatic tick uploads publish telemetry.
+14. Ask the DeepSeek assistant for a recommendation and explain the safety boundary: AI recommends; PLC logic controls.
 
 ## Tests
 
@@ -213,9 +266,10 @@ The suite covers:
 - Direct top and bottom temperature control.
 - Seven-layer initialization, tag publication, exponential heating/cooling, convergence, and non-overshoot behavior.
 - PLC state transitions, bounded outputs, high-high pressure shutdown, and low-level interlocks.
-- Feed-cycle phase latching, automatic enables, and feedback-confirmed break-before-make transitions.
+- Feed-cycle phase latching, manual overrides, capacity trips, and feedback-confirmed break-before-make transitions.
 - Four fault-detection paths.
 - SQLite writes, legacy database migration, tick queries, reset behavior, and latest-tick recovery.
-- General and layer-temperature chart rendering with tick-based `Second` axes.
+- Process, equipment-state, tank-level, and layer-temperature chart rendering with tick-based `Second` axes.
+- ThingsBoard HTTP/MQTT payload building and Streamlit upload wiring.
 - Streamlit session compatibility after process, historian, or visualization model changes.
 - AI prompt safety content and deterministic fallback recommendations.
