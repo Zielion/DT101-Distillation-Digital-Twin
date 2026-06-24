@@ -39,6 +39,11 @@ from distillation import historian as historian_module
 from distillation import plc as plc_module
 from distillation import process as process_module
 from distillation import tags as tags_module
+from distillation.telegram_alerts import (
+    AlarmEdgeDetector,
+    TelegramAlertSender,
+    send_fresh_alarm_alerts,
+)
 from distillation import visualization as visualization_module
 
 
@@ -266,6 +271,15 @@ def init_session() -> None:
         st.session_state.capacity_trip_alarms = []
     if "alarm_text_first_triggered_at" not in st.session_state:
         st.session_state.alarm_text_first_triggered_at = {}
+    if "telegram_alarm_detector" not in st.session_state:
+        st.session_state.telegram_alarm_detector = AlarmEdgeDetector(
+            throttle_seconds=telegram_alert_throttle_seconds()
+        )
+        st.session_state.telegram_alarm_detector.seed(
+            {alarm: alarm in st.session_state.active_alarms for alarm in CAPACITY_ALARM_TAGS}
+        )
+    if "telegram_alert_status" not in st.session_state:
+        st.session_state.telegram_alert_status = "Telegram alerts are not configured."
     if "last_ai_response" not in st.session_state:
         st.session_state.last_ai_response = "No recommendation requested yet."
     if "last_ai_alarm_signature" not in st.session_state:
@@ -331,6 +345,10 @@ def reset_simulation() -> None:
     st.session_state.capacity_trip_active = False
     st.session_state.capacity_trip_alarms = []
     st.session_state.alarm_text_first_triggered_at = {}
+    st.session_state.telegram_alarm_detector = AlarmEdgeDetector(
+        throttle_seconds=telegram_alert_throttle_seconds()
+    )
+    st.session_state.telegram_alert_status = "Telegram alerts have not sent data since reset."
     st.session_state.last_ai_response = "No recommendation requested yet."
     st.session_state.last_ai_alarm_signature = ()
     st.session_state.last_cloud_upload_tick = None
@@ -408,6 +426,68 @@ def config_value(name: str, default: str | None = None) -> str | None:
 
 def thingsboard_access_token() -> str | None:
     return config_value("THINGSBOARD_ACCESS_TOKEN")
+
+
+def telegram_bot_token() -> str | None:
+    return config_value("TELEGRAM_BOT_TOKEN")
+
+
+def telegram_chat_id() -> str | None:
+    return config_value("TELEGRAM_CHAT_ID")
+
+
+def telegram_alert_dry_run() -> bool:
+    value = str(config_value("TELEGRAM_ALERT_DRY_RUN", "false")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def telegram_alert_throttle_seconds() -> float:
+    value = config_value("TELEGRAM_ALERT_THROTTLE_SECONDS", "60")
+    try:
+        return max(0.0, float(value or 60))
+    except ValueError:
+        return 60.0
+
+
+def telegram_alerts_enabled() -> bool:
+    if running_under_streamlit_app_test() and os.environ.get("TELEGRAM_ALERTS_IN_APP_TEST") != "1":
+        return False
+    return bool(telegram_bot_token() and telegram_chat_id())
+
+
+def telegram_alarm_labels() -> dict[str, str]:
+    return {
+        alarm: TAG_DICTIONARY[alarm].description
+        for alarm in CAPACITY_ALARM_TAGS
+        if alarm in TAG_DICTIONARY
+    }
+
+
+def send_capacity_telegram_alerts(mode: str, alarms: list[str], now: datetime) -> None:
+    if not telegram_alerts_enabled():
+        st.session_state.telegram_alert_status = (
+            "Telegram alerts disabled: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID."
+        )
+        return
+
+    sender = TelegramAlertSender(
+        bot_token=telegram_bot_token(),
+        chat_id=telegram_chat_id(),
+        dry_run=telegram_alert_dry_run(),
+    )
+    messages = send_fresh_alarm_alerts(
+        detector=st.session_state.telegram_alarm_detector,
+        sender=sender,
+        active_alarms=alarms,
+        watched_alarms=sorted(CAPACITY_ALARM_TAGS),
+        labels=telegram_alarm_labels(),
+        mode=mode,
+        timestamp=now.isoformat(),
+    )
+    if messages:
+        st.session_state.telegram_alert_status = (
+            f"Sent {len(messages)} Telegram capacity alarm alert(s)."
+        )
 
 
 def thingsboard_host() -> str:
@@ -620,6 +700,7 @@ def simulation_tick() -> None:
     st.session_state.capacity_trip_alarms = sorted(post_step_capacity_alarms)
     st.session_state.alarm_text_first_triggered_at = alarm_registry
     st.session_state.tick_count = next_tick
+    send_capacity_telegram_alerts(plc_output.mode, all_alarms, now)
     update_ai_response_for_new_alarms(plc_output.mode, all_alarms)
 
 
@@ -1618,6 +1699,15 @@ with st.sidebar:
         disabled=not bool(thingsboard_token),
     ):
         upload_latest_trends_to_cloud(ticks=600)
+    st.divider()
+    st.markdown("#### Telegram alerts")
+    if telegram_alerts_enabled():
+        st.caption("Enabled for tank 90% capacity trip alarms only.")
+        if telegram_alert_dry_run():
+            st.caption("Dry-run mode: messages are not posted to Telegram.")
+    else:
+        st.caption("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable capacity trip alerts.")
+    st.caption(st.session_state.telegram_alert_status)
     continuous_simulation_fragment(ticks)
 
 state = state_with_manual_temperatures(
