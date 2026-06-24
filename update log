@@ -21,3 +21,13 @@ Verify composition changes in line with temperature changes in the distillation 
 Add a function to refill the feed tank - can be fixed volume addition or continuous addition
 Simplify the model and remove unnecessary parts - recycler and extra pipe connections to be removed
 Clean-up user interface
+
+2026/6/24
+Changes to model and integration:
+Added Telegram notifications for fresh 90% Feed, distillate, and bottoms tank capacity trip alarms.
+Added rising-edge detection so already-active alarms are not sent as new alerts when the app starts.
+Added per-alarm throttling and dry-run mode for Telegram alert testing.
+Added sidebar Telegram status text showing whether alerts are configured, disabled, or running in dry-run mode.
+
+Documentation updates:
+Updated README with Telegram configuration, architecture flow, project structure, capacity-trip alert behavior, demo steps, and test coverage.

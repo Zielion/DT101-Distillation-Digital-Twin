@@ -1,6 +1,6 @@
 # DT101 Distillation Digital Twin
 
-This project is a Python/Streamlit digital twin of a simplified continuous binary distillation column. It connects an explainable process model to PLC-style control, simulated sensors and actuators, fault injection, a local tag bus and SQLite historian, interactive process visualization, and a DeepSeek-powered operator assistant.
+This project is a Python/Streamlit digital twin of a simplified continuous binary distillation column. It connects an explainable process model to PLC-style control, simulated sensors and actuators, fault injection, a local tag bus and SQLite historian, interactive process visualization, Telegram alarm notifications, and a DeepSeek-powered operator assistant.
 
 The implementation follows the assignment concept described in `Distillation_Processing_Introduction_EN.md`. It prioritizes understandable process behavior and demonstrable Industry 4.0 data flow over rigorous chemical thermodynamics.
 
@@ -18,6 +18,7 @@ The implementation follows the assignment concept described in `Distillation_Pro
 - Four injectable faults covering sensor, equipment, process, and infrastructure layers.
 - SQLite historian with tick-based process, equipment-state, tank-level, and seven-layer temperature charts.
 - Optional ThingsBoard Cloud telemetry upload over HTTP or MQTT, with dashboard JSON artifacts.
+- Optional Telegram notifications for fresh 90% tank capacity trip alarms, with per-alarm throttling and dry-run support.
 - DeepSeek operator recommendations with a deterministic fallback when the API is unavailable.
 
 ## Run
@@ -78,6 +79,29 @@ The same keys can be stored locally in `.streamlit/secrets.toml`. Do not commit 
 - `thingsboard_dt101_dashboard.json`
 - `thingsboard_dt101_dashboard_minimal_import_test.json`
 
+### Telegram alarm configuration
+
+Set a Telegram bot token and chat ID to enable capacity-trip alarm notifications:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN="your_bot_token"
+$env:TELEGRAM_CHAT_ID="your_chat_id"
+```
+
+Only fresh 90% tank capacity trip alarms are sent. Existing alarms are seeded on app startup so already-active alarms are not posted as new alerts. Repeated alerts for the same alarm are throttled; the default throttle interval is 60 seconds:
+
+```powershell
+$env:TELEGRAM_ALERT_THROTTLE_SECONDS="60"
+```
+
+Use dry-run mode to exercise the alert path without posting to Telegram:
+
+```powershell
+$env:TELEGRAM_ALERT_DRY_RUN="true"
+```
+
+The same keys can be stored in `.streamlit/secrets.toml`. Telegram alerts are disabled automatically during Streamlit app tests unless `TELEGRAM_ALERTS_IN_APP_TEST=1` is set.
+
 ## Architecture
 
 ```text
@@ -96,10 +120,13 @@ In-memory tag bus -> SQLite historian -> Streamlit trends
 Optional ThingsBoard HTTP/MQTT telemetry upload
                 |
                 v
+Optional Telegram capacity-trip notifications
+                |
+                v
 DeepSeek operator assistant or deterministic fallback
 ```
 
-The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity and industrial data storage without requiring external infrastructure. When configured, the app can also publish the visible trend groups to ThingsBoard Cloud. Fast control and safety decisions remain in the PLC layer; the AI assistant receives process evidence and produces recommendations but does not directly control equipment.
+The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity and industrial data storage without requiring external infrastructure. When configured, the app can also publish the visible trend groups to ThingsBoard Cloud and send fresh capacity-trip alerts to Telegram. Fast control and safety decisions remain in the PLC layer; cloud telemetry, Telegram alerts, and the AI assistant observe the process state but do not directly control equipment.
 
 ## Project structure
 
@@ -111,6 +138,7 @@ The local tag bus and historian simulate the role of MQTT/OPC-UA connectivity an
 - `distillation/historian.py`: in-memory tag bus and SQLite historian with timestamp and tick storage.
 - `distillation/visualization.py`: process, equipment-state, tank-level, and layer-temperature historian chart builders.
 - `distillation/cloud_bridge.py`: ThingsBoard HTTP/MQTT payload building and upload clients.
+- `distillation/telegram_alerts.py`: Telegram message formatting, rising-edge alarm detection, throttling, dry-run behavior, and HTTP posting.
 - `distillation/alarm_display.py`: transient alarm text visibility timing.
 - `distillation/ai_assistant.py`: DeepSeek client, prompt builder, and deterministic fallback.
 - `thingsboard_dt101_*.json`: importable ThingsBoard dashboard artifacts.
@@ -208,6 +236,8 @@ All three tanks have a 90% capacity trip:
 
 A Feed tank overfill locks `P-100` and `V-099` to prevent additional upstream filling, while allowing a controlled manual V-100 drainage path if product tanks are not tripped. A distillate or bottoms tank overfill locks the feed path, including V-100, while keeping the matching product drain controls available for manual recovery. High-high pressure remains the strongest interlock and closes V-100 even if it is manually forced on.
 
+When Telegram is configured, these capacity trips can also send external notifications. The alert sender watches only the capacity-trip alarm tags, sends on rising edges, suppresses alarms already active at startup, and applies the configured per-alarm throttle before sending another notification for the same tag.
+
 ## Main temperature tags
 
 Layer numbering runs from bottom to top:
@@ -249,8 +279,9 @@ Each fault is designed to produce detectable evidence within 60 simulated second
 10. Inject data staleness and show that historian traces stop receiving new points while the local simulation can continue.
 11. Compare the process, equipment-state, tank-level, and seven-layer historian charts. All use simulated seconds on the X-axis.
 12. Trigger a 90% capacity trip and show how locked manual controls guide recovery.
-13. If a ThingsBoard token is configured, upload the latest trend window or let automatic tick uploads publish telemetry.
-14. Ask the DeepSeek assistant for a recommendation and explain the safety boundary: AI recommends; PLC logic controls.
+13. If Telegram is configured, show the sidebar alert status and the capacity-trip notification path; use dry-run mode for demos that should not post externally.
+14. If a ThingsBoard token is configured, upload the latest trend window or let automatic tick uploads publish telemetry.
+15. Ask the DeepSeek assistant for a recommendation and explain the safety boundary: AI recommends; PLC logic controls.
 
 ## Tests
 
@@ -271,5 +302,6 @@ The suite covers:
 - SQLite writes, legacy database migration, tick queries, reset behavior, and latest-tick recovery.
 - Process, equipment-state, tank-level, and layer-temperature chart rendering with tick-based `Second` axes.
 - ThingsBoard HTTP/MQTT payload building and Streamlit upload wiring.
+- Telegram capacity-trip rising-edge detection, message formatting, dry-run behavior, and HTTP sender wiring.
 - Streamlit session compatibility after process, historian, or visualization model changes.
 - AI prompt safety content and deterministic fallback recommendations.
